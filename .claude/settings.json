@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f claude-progress.txt ]; then echo '📋 === PROGRESS ==='; head -20 claude-progress.txt; fi && if [ -f feature_list.json ]; then echo '📊 === FEATURES ==='; python3 -c \"import json,sys; d=json.load(open('feature_list.json')); s=d.get('summary',{}); print(f'Progress: {s.get(\\\"done\\\",0)}/{s.get(\\\"total\\\",0)} ({s.get(\\\"progress_pct\\\",0)}%)'); [print(f'  Next: {f[\\\"id\\\"]} - {f[\\\"name\\\"]}') for p in d.get('phases',[]) for f in p.get('features',[]) if not f.get('passes')][:3]\" 2>/dev/null; fi"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f claude-progress.txt ] && cp claude-progress.txt claude-progress.txt.bak && echo 'Progress backed up before compaction' || true",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

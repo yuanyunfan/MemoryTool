@@ -1,0 +1,65 @@
+# MemoryTool — Progress Log
+# Update this file at the end of every Claude Code session. Read it at the start of the next session.
+
+## Current Status: Phase 0 — Project Scaffolding
+
+## Completed ✅
+（暂无）
+
+## In Progress 🔄
+（暂无）
+
+## Not Started ⏳
+
+### Phase 0: Project Scaffolding
+- [ ] Package.swift with 3 targets (MemoryCore, MemoryToolApp, MemoryMCP)
+- [ ] GRDB.swift dependency integration
+- [ ] MCP swift-sdk dependency integration
+- [ ] Basic project compiles successfully
+- [ ] .gitignore for Swift/Xcode
+
+### Phase 1: Core Data Layer (MemoryCore)
+- [ ] SQLite database setup with GRDB (WAL mode)
+- [ ] Memory model and CRUD operations
+- [ ] Tag model and many-to-many relationship
+- [ ] FTS5 full-text search index
+- [ ] Database migration system
+- [ ] MemoryService with search/filter API
+- [ ] Unit tests for data layer
+
+### Phase 2: MCP Server (MemoryMCP)
+- [ ] stdio transport setup with swift-sdk
+- [ ] `remember` tool implementation
+- [ ] `recall` tool (FTS5 search)
+- [ ] `forget` tool
+- [ ] `update_memory` tool
+- [ ] `list_categories` tool
+- [ ] `get_memory` tool
+- [ ] MCP server integration tests
+- [ ] Claude Code configuration guide
+
+### Phase 3: SwiftUI App (MemoryToolApp)
+- [ ] App entry point and main window
+- [ ] Memory list view with search bar
+- [ ] Memory detail/edit view
+- [ ] Create new memory view
+- [ ] Delete memory with confirmation
+- [ ] Tag management sidebar
+- [ ] Category filter
+- [ ] Settings view (DB path, export/import)
+
+### Phase 4: Integration & Polish
+- [ ] Companion binary packaging in app bundle
+- [ ] One-click MCP config installer
+- [ ] Menu bar quick-access (optional)
+- [ ] Data export/import (JSON)
+- [ ] Error handling and user-facing alerts
+- [ ] End-to-end testing (GUI → DB ← MCP)
+
+## Architecture Notes
+
+- **Shared SQLite**: GUI and MCP server are separate processes sharing one .db file via WAL mode
+- **MCP Transport**: stdio only (V1). Claude Code spawns MemoryMCP as subprocess
+- **No print() in MCP target**: stdout is MCP protocol channel, use os_log/stderr for debugging
+- **Swift MCP SDK**: official modelcontextprotocol/swift-sdk 0.12.0
+- **DB Library**: GRDB.swift for type-safe SQLite access with FTS5 support

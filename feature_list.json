@@ -1,0 +1,222 @@
+{
+  "project": "MemoryTool",
+  "version": "0.1.0",
+  "last_updated": "2026-04-03",
+  "phases": [
+    {
+      "id": "phase-0",
+      "name": "Project Scaffolding",
+      "status": "not_started",
+      "features": [
+        {
+          "id": "f001",
+          "name": "Package.swift with 3 targets (MemoryCore lib, MemoryToolApp, MemoryMCP CLI)",
+          "passes": false,
+          "notes": "GRDB.swift + swift-sdk as dependencies"
+        },
+        {
+          "id": "f002",
+          "name": "Basic project structure (Sources/, Tests/ directories)",
+          "passes": false,
+          "notes": "Placeholder files so all targets compile"
+        },
+        {
+          "id": "f003",
+          "name": ".gitignore for Swift/Xcode/SPM",
+          "passes": false,
+          "notes": ""
+        },
+        {
+          "id": "f005",
+          "name": "swift build succeeds with zero warnings",
+          "passes": false,
+          "notes": "Verification gate for phase-0"
+        }
+      ]
+    },
+    {
+      "id": "phase-1",
+      "name": "Core Data Layer (MemoryCore)",
+      "status": "not_started",
+      "features": [
+        {
+          "id": "f010",
+          "name": "SQLite database setup with GRDB (WAL mode, migrations)",
+          "passes": false,
+          "notes": "AppDatabase singleton, configurable path"
+        },
+        {
+          "id": "f011",
+          "name": "Memory model — struct + GRDB Record conformance",
+          "passes": false,
+          "notes": "id, content, category, source, created_at, updated_at, metadata"
+        },
+        {
+          "id": "f012",
+          "name": "Tag model + memory_tag join table",
+          "passes": false,
+          "notes": "Many-to-many relationship"
+        },
+        {
+          "id": "f013",
+          "name": "FTS5 virtual table for full-text search",
+          "passes": false,
+          "notes": "Sync triggers for insert/update/delete"
+        },
+        {
+          "id": "f014",
+          "name": "MemoryService — CRUD + search + filter API",
+          "passes": false,
+          "notes": "Single entry point for all data operations"
+        },
+        {
+          "id": "f015",
+          "name": "Unit tests for MemoryCore (80%+ coverage)",
+          "passes": false,
+          "notes": "In-memory SQLite for test isolation"
+        }
+      ]
+    },
+    {
+      "id": "phase-2",
+      "name": "MCP Server (MemoryMCP)",
+      "status": "not_started",
+      "features": [
+        {
+          "id": "f020",
+          "name": "MCP stdio transport setup with swift-sdk",
+          "passes": false,
+          "notes": "Entry point, server registration, no print() allowed"
+        },
+        {
+          "id": "f021",
+          "name": "remember tool — store new memory via MCP",
+          "passes": false,
+          "notes": "Params: content, category?, tags?, metadata?"
+        },
+        {
+          "id": "f022",
+          "name": "recall tool — FTS5 keyword search via MCP",
+          "passes": false,
+          "notes": "Params: query, category?, tags?, limit?"
+        },
+        {
+          "id": "f023",
+          "name": "forget tool — delete memory by ID",
+          "passes": false,
+          "notes": ""
+        },
+        {
+          "id": "f024",
+          "name": "update_memory tool — modify existing memory",
+          "passes": false,
+          "notes": "Partial update support"
+        },
+        {
+          "id": "f025",
+          "name": "list_categories + get_memory tools",
+          "passes": false,
+          "notes": "Utility tools for AI browsing"
+        },
+        {
+          "id": "f026",
+          "name": "MCP server tested end-to-end with Claude Code",
+          "passes": false,
+          "notes": "Configure in settings.json, verify remember/recall cycle"
+        }
+      ]
+    },
+    {
+      "id": "phase-3",
+      "name": "SwiftUI App (MemoryToolApp)",
+      "status": "not_started",
+      "features": [
+        {
+          "id": "f030",
+          "name": "App entry point + main window with NavigationSplitView",
+          "passes": false,
+          "notes": "Sidebar (categories/tags) + List + Detail"
+        },
+        {
+          "id": "f031",
+          "name": "Memory list view with search bar",
+          "passes": false,
+          "notes": "Real-time FTS5 search, sort by date"
+        },
+        {
+          "id": "f032",
+          "name": "Memory detail/edit view",
+          "passes": false,
+          "notes": "View + inline edit, tag chips, metadata display"
+        },
+        {
+          "id": "f033",
+          "name": "Create new memory sheet",
+          "passes": false,
+          "notes": "Content editor, category picker, tag selector"
+        },
+        {
+          "id": "f034",
+          "name": "Delete with confirmation + bulk operations",
+          "passes": false,
+          "notes": "Swipe-to-delete + multi-select delete"
+        },
+        {
+          "id": "f035",
+          "name": "Tag management sidebar",
+          "passes": false,
+          "notes": "Create/rename/delete tags, filter by tag"
+        },
+        {
+          "id": "f036",
+          "name": "Settings view (DB path display, export/import JSON)",
+          "passes": false,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "id": "phase-4",
+      "name": "Integration & Polish",
+      "status": "not_started",
+      "features": [
+        {
+          "id": "f040",
+          "name": "Companion binary packaging in app bundle",
+          "passes": false,
+          "notes": "MemoryMCP binary at Contents/MacOS/ or Resources/"
+        },
+        {
+          "id": "f041",
+          "name": "One-click MCP config installer (writes claude settings)",
+          "passes": false,
+          "notes": "Button in app that configures Claude Code automatically"
+        },
+        {
+          "id": "f042",
+          "name": "Data export/import (JSON format)",
+          "passes": false,
+          "notes": "Backup and restore all memories"
+        },
+        {
+          "id": "f043",
+          "name": "Error handling and user-facing alerts",
+          "passes": false,
+          "notes": "Graceful DB errors, MCP connection status"
+        },
+        {
+          "id": "f044",
+          "name": "End-to-end test: GUI create → MCP recall → GUI verify",
+          "passes": false,
+          "notes": "Full integration verification"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "total": 27,
+    "done": 0,
+    "remaining": 27,
+    "progress_pct": 0
+  }
+}
