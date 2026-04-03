@@ -75,9 +75,10 @@ struct ToolHandler: Sendable {
     // MARK: - recall
 
     private func handleRecall(_ arguments: [String: Value]?) throws -> CallTool.Result {
-        guard let query = arguments?["query"]?.stringValue else {
-            return errorResult("Parameter 'query' is required.")
-        }
+        // Accept both "query" and "content" as parameter name (Claude sometimes confuses them)
+        let query = arguments?["query"]?.stringValue
+            ?? arguments?["content"]?.stringValue
+            ?? ""
 
         let category = arguments?["category"]?.stringValue
         let tags = extractTags(from: arguments)
