@@ -34,11 +34,12 @@ if ! swift build -c release --product "$BINARY_NAME" 2>&1; then
 fi
 info "Build succeeded."
 
-# ---- Step 2: Install binary ----
+# ---- Step 2: Install binary (symlink to avoid macOS code signing issues with cp) ----
 mkdir -p "$INSTALL_DIR"
-cp ".build/release/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
-chmod +x "$INSTALL_DIR/$BINARY_NAME"
-info "Installed $BINARY_NAME → $INSTALL_DIR/$BINARY_NAME"
+BUILT_BINARY="$(cd "$(dirname "$0")" && pwd)/.build/release/$BINARY_NAME"
+rm -f "$INSTALL_DIR/$BINARY_NAME"
+ln -s "$BUILT_BINARY" "$INSTALL_DIR/$BINARY_NAME"
+info "Installed $BINARY_NAME → $INSTALL_DIR/$BINARY_NAME (symlink)"
 
 # ---- Step 3: Ensure data directory ----
 mkdir -p "$HOME/.memorytool"
