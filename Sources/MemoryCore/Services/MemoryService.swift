@@ -87,7 +87,11 @@ public final class MemoryService: Sendable {
 
     // MARK: - Search
 
-    /// Full-text search using FTS5. Falls back to listing if query is empty.
+    /// Full-text search using FTS5 with LIKE fallback for short terms.
+    ///
+    /// FTS5 trigram tokenizer requires ≥3 characters per term. For shorter
+    /// terms (common in CJK, e.g. "火锅") we fall back to SQL LIKE.
+    /// Multiple terms use OR semantics — matching *any* term is enough.
     public func searchMemories(
         query: String,
         category: String? = nil,
@@ -95,31 +99,60 @@ public final class MemoryService: Sendable {
         limit: Int = 20
     ) throws -> [Memory] {
         let effectiveLimit = min(max(limit, 1), 100)
-        let sanitized = sanitizeFTSQuery(query)
+        let terms = extractSearchTerms(query)
 
-        // If query is empty after sanitization, fall back to list
-        guard !sanitized.isEmpty else {
+        // If no terms after sanitization, fall back to list
+        guard !terms.isEmpty else {
             return try listMemories(category: category, limit: effectiveLimit, offset: 0)
         }
 
+        // Split terms: trigram FTS5 needs ≥3 chars, shorter ones use LIKE
+        let ftsTerms = terms.filter { $0.count >= 3 }
+        let likeTerms = terms.filter { $0.count < 3 }
+
         return try db.reader().read { dbConn in
+            // Build UNION of FTS5 hits and LIKE hits
+            var unionParts: [String] = []
+            var arguments: [any DatabaseValueConvertible] = []
+
+            if !ftsTerms.isEmpty {
+                let ftsQuery = ftsTerms.joined(separator: " OR ")
+                unionParts.append("""
+                    SELECT memory.*, memory_fts.rank AS search_rank
+                    FROM memory
+                    INNER JOIN memory_fts ON memory_fts.rowid = memory.rowid
+                        AND memory_fts MATCH ?
+                    """)
+                arguments.append(ftsQuery)
+            }
+
+            for term in likeTerms {
+                unionParts.append("""
+                    SELECT memory.*, 0.0 AS search_rank
+                    FROM memory
+                    WHERE memory.content LIKE ?
+                    """)
+                arguments.append("%\(term)%")
+            }
+
+            // Wrap in a deduplication layer (GROUP BY keeps best rank per memory)
+            let innerSQL = unionParts.joined(separator: " UNION ALL ")
             var sql = """
-                SELECT memory.*
-                FROM memory
-                INNER JOIN memory_fts ON memory_fts.rowid = memory.rowid
-                    AND memory_fts MATCH ?
+                SELECT id, content, category, source, created_at, updated_at, metadata,
+                       MIN(search_rank) AS best_rank
+                FROM (\(innerSQL))
+                WHERE 1=1
                 """
-            var arguments: [any DatabaseValueConvertible] = [sanitized]
 
             if let category {
-                sql += " AND memory.category = ?"
+                sql += " AND category = ?"
                 arguments.append(category)
             }
 
             if let tags, !tags.isEmpty {
                 let placeholders = tags.map { _ in "?" }.joined(separator: ", ")
                 sql += """
-                     AND memory.id IN (
+                     AND id IN (
                         SELECT mt.memory_id FROM memory_tag mt
                         INNER JOIN tag t ON t.id = mt.tag_id
                         WHERE t.name IN (\(placeholders))
@@ -131,7 +164,7 @@ public final class MemoryService: Sendable {
                 arguments.append(tags.count)
             }
 
-            sql += " ORDER BY rank LIMIT ?"
+            sql += " GROUP BY id ORDER BY best_rank LIMIT ?"
             arguments.append(effectiveLimit)
 
             return try Memory.fetchAll(
@@ -276,8 +309,11 @@ public final class MemoryService: Sendable {
         }
     }
 
-    /// Sanitize a search query by removing FTS5 special operators.
-    private func sanitizeFTSQuery(_ query: String) -> String {
+    /// Extract and sanitize individual search terms from a raw query string.
+    ///
+    /// Removes FTS5 operators and special characters, then returns each
+    /// whitespace-separated token as a clean term.
+    private func extractSearchTerms(_ query: String) -> [String] {
         let ftsOperators = ["AND", "OR", "NOT", "NEAR"]
         var result = query
 
@@ -297,8 +333,7 @@ public final class MemoryService: Sendable {
         let specialChars: Set<Character> = ["*", "\"", "(", ")", "{", "}", "^", ":", "+"]
         result = String(result.filter { !specialChars.contains($0) })
 
-        // Collapse whitespace and trim
-        let components = result.split(separator: " ").map(String.init)
-        return components.joined(separator: " ")
+        // Split into individual terms, dropping empties
+        return result.split(separator: " ").map(String.init).filter { !$0.isEmpty }
     }
 }

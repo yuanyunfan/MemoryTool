@@ -263,6 +263,48 @@ import Foundation
     #expect(try service.totalMemoryCount() == 2)
 }
 
+// MARK: - CJK / Chinese Search Tests
+
+@Test func searchChineseSubstring() throws {
+    let db = try AppDatabase.createInMemory()
+    let service = MemoryService(database: db)
+
+    try service.createMemory(content: "我爱吃火锅", category: "user-preference")
+    try service.createMemory(content: "今天天气很好", category: "general")
+
+    // trigram tokenizer should match substring "爱吃" within "我爱吃火锅"
+    let results = try service.searchMemories(query: "爱吃", limit: 10)
+    #expect(results.count == 1)
+    #expect(results.first?.content == "我爱吃火锅")
+}
+
+@Test func searchChineseMultipleTermsOR() throws {
+    let db = try AppDatabase.createInMemory()
+    let service = MemoryService(database: db)
+
+    try service.createMemory(content: "我爱吃火锅", category: "user-preference")
+    try service.createMemory(content: "Python is great for scripting", category: "tech")
+
+    // Multiple terms should use OR logic: "爱吃" matches first memory,
+    // "食物" and "美食" match nothing, but OR ensures partial match works
+    let results = try service.searchMemories(query: "爱吃 食物 美食", limit: 10)
+    #expect(results.count >= 1)
+    #expect(results.contains(where: { $0.content == "我爱吃火锅" }))
+}
+
+@Test func searchChineseWithCategoryFilter() throws {
+    let db = try AppDatabase.createInMemory()
+    let service = MemoryService(database: db)
+
+    try service.createMemory(content: "我喜欢用Swift编程", category: "tech")
+    try service.createMemory(content: "我喜欢吃寿司", category: "user-preference")
+
+    // Both contain "喜欢", but category filter narrows it down
+    let results = try service.searchMemories(query: "喜欢", category: "tech", limit: 10)
+    #expect(results.count == 1)
+    #expect(results.first?.content.contains("Swift") == true)
+}
+
 // MARK: - Edge Cases
 
 @Test func memoryModelEquality() {
