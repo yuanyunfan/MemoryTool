@@ -24,11 +24,55 @@ final class MemoryViewModel {
 
     private let service: MemoryService
     private var searchTask: Task<Void, Never>?
+    private var pollTask: Task<Void, Never>?
+    private var lastKnownCount: Int = -1
 
     // MARK: - Init
 
     init(service: MemoryService) {
         self.service = service
+    }
+
+    // MARK: - Auto Refresh
+
+    /// Start polling the database for external changes (e.g., MCP server writes).
+    /// Checks every 2 seconds if total count changed; if so, reloads everything.
+    func startAutoRefresh() {
+        stopAutoRefresh()
+        pollTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, let self else { return }
+                self.checkForExternalChanges()
+            }
+        }
+    }
+
+    /// Stop the auto-refresh polling.
+    func stopAutoRefresh() {
+        pollTask?.cancel()
+        pollTask = nil
+    }
+
+    /// Check if the database was modified externally and reload if needed.
+    private func checkForExternalChanges() {
+        do {
+            let currentCount = try service.totalMemoryCount()
+            let currentTags = try service.listAllTags()
+            let currentCategories = try service.listCategories()
+
+            let tagsChanged = currentTags.map(\.name) != tags.map(\.name)
+            let categoriesChanged = currentCategories != categories
+            let countChanged = currentCount != lastKnownCount
+
+            if countChanged || tagsChanged || categoriesChanged {
+                lastKnownCount = currentCount
+                loadMemories()
+                loadSidebarData()
+            }
+        } catch {
+            // Silently ignore polling errors
+        }
     }
 
     // MARK: - Loading
@@ -64,6 +108,7 @@ final class MemoryViewModel {
                 )
             }
             totalCount = try service.totalMemoryCount()
+            lastKnownCount = totalCount
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -87,6 +132,7 @@ final class MemoryViewModel {
             categories = try service.listCategories()
             tags = try service.listAllTags()
             totalCount = try service.totalMemoryCount()
+            lastKnownCount = totalCount
         } catch {
             errorMessage = error.localizedDescription
         }

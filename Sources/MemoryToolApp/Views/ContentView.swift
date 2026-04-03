@@ -32,6 +32,10 @@ struct ContentView: View {
         .onAppear {
             viewModel.loadSidebarData()
             viewModel.loadMemories()
+            viewModel.startAutoRefresh()
+        }
+        .onDisappear {
+            viewModel.stopAutoRefresh()
         }
         .alert(
             "Error",

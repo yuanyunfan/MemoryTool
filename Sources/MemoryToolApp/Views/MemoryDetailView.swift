@@ -19,14 +19,26 @@ struct MemoryDetailView: View {
     // Track which memory we're editing
     @State private var loadedMemoryId: String?
 
+    /// The currently selected memory, looked up from the view model.
+    private var selectedMemory: Memory? {
+        guard let id = viewModel.selectedMemoryId else { return nil }
+        return viewModel.memories.first(where: { $0.id == id })
+    }
+
     var body: some View {
-        Group {
-            if let memoryId = viewModel.selectedMemoryId,
-               let memory = viewModel.memories.first(where: { $0.id == memoryId }) {
-                detailContent(memory: memory)
+        // Use a stable view identity so polling doesn't rebuild TextEditor
+        VStack {
+            if viewModel.selectedMemoryId != nil, selectedMemory != nil {
+                detailContent
             } else {
                 placeholderView
             }
+        }
+        .onChange(of: viewModel.selectedMemoryId) {
+            loadMemoryData()
+        }
+        .onAppear {
+            loadMemoryData()
         }
     }
 
@@ -42,27 +54,21 @@ struct MemoryDetailView: View {
 
     // MARK: - Detail Content
 
-    private func detailContent(memory: Memory) -> some View {
+    private var detailContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                headerSection(memory: memory)
+                headerSection
                 Divider()
                 contentSection
                 Divider()
-                tagsSection(memoryId: memory.id)
+                tagsSection
                 Divider()
                 sourceSection
                 metadataSection
                 Divider()
-                actionButtons(memory: memory)
+                actionButtons
             }
             .padding()
-        }
-        .onChange(of: viewModel.selectedMemoryId) {
-            loadMemoryData()
-        }
-        .onAppear {
-            loadMemoryData()
         }
         .alert("Delete Memory", isPresented: $showDeleteAlert) {
             Button("Cancel", role: .cancel) {}
@@ -78,7 +84,7 @@ struct MemoryDetailView: View {
 
     // MARK: - Header
 
-    private func headerSection(memory: Memory) -> some View {
+    private var headerSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Category")
@@ -99,14 +105,16 @@ struct MemoryDetailView: View {
             .labelsHidden()
             .onChange(of: editCategory) { markChanged() }
 
-            HStack(spacing: 16) {
-                Label(DateFormatters.fullString(from: memory.createdAt), systemImage: "calendar")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if let memory = selectedMemory {
+                HStack(spacing: 16) {
+                    Label(DateFormatters.fullString(from: memory.createdAt), systemImage: "calendar")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
-                Label(DateFormatters.relativeString(from: memory.updatedAt), systemImage: "clock")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    Label(DateFormatters.relativeString(from: memory.updatedAt), systemImage: "clock")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -131,8 +139,9 @@ struct MemoryDetailView: View {
 
     // MARK: - Tags
 
-    private func tagsSection(memoryId: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private var tagsSection: some View {
+        let memoryId = viewModel.selectedMemoryId ?? ""
+        return VStack(alignment: .leading, spacing: 8) {
             Text("Tags")
                 .font(.headline)
 
@@ -200,10 +209,12 @@ struct MemoryDetailView: View {
 
     // MARK: - Action Buttons
 
-    private func actionButtons(memory: Memory) -> some View {
+    private var actionButtons: some View {
         HStack {
             Button("Save Changes") {
-                saveChanges(for: memory)
+                if let memory = selectedMemory {
+                    saveChanges(for: memory)
+                }
             }
             .buttonStyle(.borderedProminent)
             .disabled(!hasChanges)
@@ -228,27 +239,28 @@ struct MemoryDetailView: View {
 
     private func loadMemoryData() {
         guard let memoryId = viewModel.selectedMemoryId,
-              let memory = viewModel.memories.first(where: { $0.id == memoryId }),
-              loadedMemoryId != memoryId else {
-            return
-        }
-
-        loadedMemoryId = memoryId
-        editContent = memory.content
-        editCategory = memory.category
-        editSource = memory.source ?? ""
-        editMetadata = memory.metadata ?? ""
-        memoryTags = viewModel.getTagsForMemory(id: memory.id)
-        newTagText = ""
-        hasChanges = false
-        showMetadata = memory.metadata != nil && !memory.metadata!.isEmpty
-    }
-
-    private func markChanged() {
-        guard let memoryId = viewModel.selectedMemoryId,
               let memory = viewModel.memories.first(where: { $0.id == memoryId }) else {
             return
         }
+
+        if loadedMemoryId != memoryId {
+            // Switching to a different memory — full reload
+            loadedMemoryId = memoryId
+            editContent = memory.content
+            editCategory = memory.category
+            editSource = memory.source ?? ""
+            editMetadata = memory.metadata ?? ""
+            memoryTags = viewModel.getTagsForMemory(id: memory.id)
+            newTagText = ""
+            hasChanges = false
+            showMetadata = memory.metadata != nil && !memory.metadata!.isEmpty
+        }
+        // If same memory: do nothing here.
+        // Tags refresh is handled by the polling via loadSidebarData.
+    }
+
+    private func markChanged() {
+        guard let memory = selectedMemory else { return }
         hasChanges = editContent != memory.content
             || editCategory != memory.category
             || editSource != (memory.source ?? "")
@@ -262,7 +274,8 @@ struct MemoryDetailView: View {
         updated.source = editSource.isEmpty ? nil : editSource
         updated.metadata = editMetadata.isEmpty ? nil : editMetadata
         viewModel.updateMemory(updated)
-        hasChanges = false
+        loadedMemoryId = nil // Force reload after save
+        loadMemoryData()
     }
 
     private func addTag(to memoryId: String) {
