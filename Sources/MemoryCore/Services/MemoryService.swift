@@ -125,6 +125,7 @@ public final class MemoryService: Sendable {
     }
 
     /// Deletes a memory by ID. Returns true if a record was actually deleted.
+    /// Also cleans up orphaned tags that are no longer associated with any memory.
     @discardableResult
     public func deleteMemory(id: String) throws -> Bool {
         try db.writer().write { dbConn in
@@ -132,6 +133,13 @@ public final class MemoryService: Sendable {
                 return false
             }
             try memory.delete(dbConn)
+
+            // Clean up orphaned tags (tags with no remaining memory associations)
+            try dbConn.execute(sql: """
+                DELETE FROM tag
+                WHERE id NOT IN (SELECT DISTINCT tag_id FROM memory_tag)
+                """)
+
             return true
         }
     }
