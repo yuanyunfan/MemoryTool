@@ -23,35 +23,47 @@
 MemoryTool combines a **SwiftUI GUI** for human management with an embedded **MCP server** that AI tools (Claude Code, Claude Desktop) use to store and retrieve memories via stdio transport.
 
 ```
-┌─────────────────────────────────────────────┐
-│              MemoryTool.app                  │
-│                                              │
-│  ┌──────────────┐    ┌───────────────────┐   │
-│  │   SwiftUI    │    │   MCP Server      │   │
-│  │   GUI        │    │   (stdio)         │   │
-│  │  CRUD +      │    │  remember/recall  │   │
-│  │  Search      │    │  forget/update    │   │
-│  └──────┬───────┘    └──────┬────────────┘   │
-│         └────────┬──────────┘                │
-│          ┌───────┴───────┐                   │
-│          │  SQLite + FTS5│                   │
-│          │  (WAL mode)   │                   │
-│          └───────────────┘                   │
-└─────────────────────────────────────────────┘
-      ↑                          ↑
-    User                    Claude Code
+┌───────────────────────────────────────────────────────┐
+│                   MemoryTool.app                      │
+│                                                       │
+│  ┌──────────────┐         ┌───────────────────────┐   │
+│  │   SwiftUI    │         │   MCP Server (stdio)  │   │
+│  │   GUI        │         │                       │   │
+│  │  CRUD +      │         │  remember (dedup)     │   │
+│  │  Search      │         │  recall (hybrid)      │   │
+│  │  Tag Mgmt    │         │  forget / update      │   │
+│  └──────┬───────┘         └──────┬────────────────┘   │
+│         └──────────┬─────────────┘                    │
+│          ┌─────────┴──────────┐                       │
+│          │  SQLite + FTS5     │                       │
+│          │  + Embeddings      │                       │
+│          │  (WAL mode)        │                       │
+│          └────────────────────┘                       │
+└───────────────────────────────────────────────────────┘
+       ↑                               ↑
+     User                         Claude Code
 ```
 
 ## Features
 
+### Core
 - **6 MCP Tools**: `remember`, `recall`, `forget`, `update_memory`, `list_categories`, `get_memory`
-- **Full-Text Search**: SQLite FTS5 with trigram tokenizer — supports Chinese, English, Japanese, Korean, and any language
 - **Native macOS GUI**: Three-column NavigationSplitView — categories, memory list, detail editor
-- **Auto-Refresh**: GUI automatically detects external database changes from MCP server (2s polling)
 - **Multi-Process Safe**: GUI and MCP server share one SQLite file via WAL mode
 - **Tags & Categories**: Flexible organization with many-to-many tag relationships
 - **Import/Export**: JSON and Markdown export for backup and portability
 - **One-Click Install**: `./install.sh` builds, installs, and configures Claude Code automatically
+
+### Search (V1.1)
+- **Hybrid Search**: Combines FTS5 keyword matching with semantic vector similarity
+- **Semantic Embeddings**: Apple NLContextualEmbedding (system BERT, 768-dim, zero external dependencies)
+- **CJK Full-Text**: FTS5 trigram tokenizer — supports Chinese, English, Japanese, Korean
+- **Weighted Ranking**: Four-factor scoring — keyword relevance + semantic similarity + recency decay (30-day half-life) + access frequency
+
+### Intelligence (V1.1)
+- **Semantic Deduplication**: Cosine similarity > 0.85 detects paraphrases (e.g. "我爱吃火锅" vs "用户爱吃火锅") and merges content automatically
+- **Access Tracking**: Records access count and last accessed time for ranking
+- **Orphan Cleanup**: Deleting a memory automatically removes unused tags
 
 ## Requirements
 
@@ -75,20 +87,19 @@ This builds the MCP server, symlinks it to `~/.memorytool/bin/`, and configures 
 
 1. **Build**:
    ```bash
-   swift build --product MemoryMCP
+   swift build -c release --product MemoryMCP
    ```
 
 2. **Install binary**:
    ```bash
    mkdir -p ~/.memorytool/bin
-   ln -sf "$(pwd)/.build/debug/MemoryMCP" ~/.memorytool/bin/MemoryMCP
+   ln -sf "$(pwd)/.build/release/MemoryMCP" ~/.memorytool/bin/MemoryMCP
    ```
 
-3. **Configure Claude Code** — add to `~/.claude.json` under `mcpServers`:
+3. **Configure Claude Code** — add to `~/.claude/settings.json` under `mcpServers`:
    ```json
    {
      "memory-tool": {
-       "type": "stdio",
        "command": "/Users/YOU/.memorytool/bin/MemoryMCP",
        "args": [],
        "env": {}
@@ -107,7 +118,7 @@ This builds the MCP server, symlinks it to `~/.memorytool/bin/`, and configures 
 ./run-app.sh
 ```
 
-This builds the app and launches it as a proper `.app` bundle (avoids keyboard events leaking to the terminal).
+This builds the app and launches it as a proper `.app` bundle.
 
 ## Tech Stack
 
@@ -117,9 +128,11 @@ This builds the app and launches it as a proper `.app` bundle (avoids keyboard e
 | GUI | SwiftUI (macOS 15+) |
 | MCP SDK | [modelcontextprotocol/swift-sdk](https://github.com/modelcontextprotocol/swift-sdk) 0.12.0 |
 | Database | SQLite via [GRDB.swift](https://github.com/groue/GRDB.swift) 7.x |
-| Search | FTS5 (trigram tokenizer) |
+| Keyword Search | FTS5 (trigram tokenizer) |
+| Semantic Search | Apple NLContextualEmbedding (768-dim, system BERT) |
+| Vector Math | Accelerate (vDSP) |
 | Transport | stdio |
-| Tests | Swift Testing — 59 tests |
+| Tests | Swift Testing — 62 tests |
 
 ## Project Structure
 
@@ -129,8 +142,9 @@ MemoryTool/
 ├── Sources/
 │   ├── MemoryCore/              # Shared library
 │   │   ├── Models/              # Memory, Tag, MemoryTag
-│   │   ├── Database/            # GRDB setup, migrations, FTS5
-│   │   └── Services/            # MemoryService, DataExporter, MCPConfigInstaller
+│   │   ├── Database/            # GRDB setup, migrations (v1-v3), FTS5
+│   │   └── Services/            # MemoryService, EmbeddingService,
+│   │                            # DataExporter, MCPConfigInstaller
 │   ├── MemoryToolApp/           # SwiftUI Mac app
 │   │   ├── Views/               # ContentView, Sidebar, List, Detail, NewMemory
 │   │   ├── ViewModels/          # MemoryViewModel (@Observable)
@@ -138,7 +152,7 @@ MemoryTool/
 │   └── MemoryMCP/               # MCP server CLI
 │       ├── main.swift           # stdio transport entry point
 │       └── Tools/               # ToolHandler + ToolDefinitions
-├── Tests/                       # 59 tests (MemoryCoreTests + MemoryMCPTests)
+├── Tests/                       # 62 tests (MemoryCoreTests + MemoryMCPTests)
 ├── install.sh                   # One-click install + Claude Code config
 ├── run-app.sh                   # Build + launch as .app bundle
 └── init.sh                      # Dev environment check
@@ -148,21 +162,72 @@ MemoryTool/
 
 | Tool | Description | Key Parameters |
 |------|-------------|----------------|
-| `remember` | Store a new memory | `content` (required), `category`, `tags`, `source`, `metadata` |
-| `recall` | Full-text search memories | `query` (required), `category`, `tags`, `limit` |
-| `forget` | Delete a memory by ID | `memory_id` (required) |
+| `remember` | Store a new memory (with semantic dedup) | `content` (required), `category`, `tags`, `source`, `metadata` |
+| `recall` | Hybrid search (keyword + semantic + ranking) | `query` (required), `category`, `tags`, `limit` |
+| `forget` | Delete a memory + clean orphan tags | `memory_id` (required) |
 | `update_memory` | Partially update a memory | `memory_id` (required), `content`, `category`, `tags` |
 | `list_categories` | List categories with counts | — |
 | `get_memory` | Retrieve a specific memory | `memory_id` (required) |
 
 ## How It Works
 
-1. **You tell Claude something** — e.g., "I'm a data engineer working with PySpark"
-2. **Claude calls `remember`** — stores it in SQLite with category `user-preference`
-3. **In a new session**, Claude calls `recall("data engineer")` — retrieves the memory
-4. **You manage memories** via the SwiftUI app — search, edit, tag, delete, export
+### Remember (with dedup)
+
+```
+Claude calls remember("用户爱吃火锅")
+  → Generate embedding (NLContextualEmbedding)
+  → Search existing memories for cosine similarity > 0.85
+    → No match → CREATE new memory
+    → Match found → MERGE content into existing memory
+  → Return memory ID
+```
+
+### Recall (hybrid search)
+
+```
+Claude calls recall("火锅")
+  → FTS5 keyword search → keyword_score
+  → Embedding cosine similarity → semantic_score
+  → Combine with ranking weights:
+      0.35 × keyword + 0.35 × semantic
+    + 0.15 × recency_decay (30-day half-life)
+    + 0.15 × access_frequency (log-normalized)
+  → Return top-K results, record access
+```
+
+### Shared Database
 
 The GUI app and MCP server share the same SQLite database (`~/.memorytool/memory.db`) via WAL mode, so changes from either side are immediately visible.
+
+## Database Schema (V3)
+
+```sql
+-- Core memory table
+CREATE TABLE memory (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    category TEXT DEFAULT 'general',
+    source TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    metadata TEXT,
+    content_hash TEXT,
+    access_count INTEGER DEFAULT 0,
+    last_accessed_at DATETIME,
+    embedding BLOB                -- 768-dim float32 vector
+);
+
+-- FTS5 full-text search (trigram tokenizer for CJK)
+CREATE VIRTUAL TABLE memory_fts USING fts5(
+    content, category, source,
+    content='memory', content_rowid='rowid',
+    tokenize='trigram'
+);
+
+-- Tags (many-to-many)
+CREATE TABLE tag (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE);
+CREATE TABLE memory_tag (memory_id TEXT, tag_id INTEGER, PRIMARY KEY (memory_id, tag_id));
+```
 
 ## Configuration
 
@@ -170,7 +235,7 @@ The GUI app and MCP server share the same SQLite database (`~/.memorytool/memory
 |------|----------|
 | Database | `~/.memorytool/memory.db` |
 | MCP Binary | `~/.memorytool/bin/MemoryMCP` |
-| Claude Code config | `~/.claude.json` → `mcpServers.memory-tool` |
+| Claude Code config | `~/.claude/settings.json` → `mcpServers.memory-tool` |
 | Custom DB path | Set env `MEMORY_TOOL_DB_PATH` |
 
 ## Development
@@ -182,7 +247,7 @@ The GUI app and MCP server share the same SQLite database (`~/.memorytool/memory
 # Build all targets
 swift build
 
-# Run tests (59 tests)
+# Run tests (62 tests)
 swift test
 
 # Run MCP server directly
@@ -190,11 +255,15 @@ swift run MemoryMCP
 
 # Launch GUI app
 ./run-app.sh
+
+# Release build
+swift build -c release
 ```
 
 ## Known Issues
 
 - **macOS binary copy issue**: `cp` of release binaries may fail silently due to macOS code signing. The install script uses `ln -s` (symlink) to avoid this.
+- **NLContextualEmbedding model download**: The Chinese (Han) embedding model may need to be downloaded by the system on first use. If unavailable, semantic search falls back to keyword-only mode.
 - **App Store**: Not currently distributed via App Store (MCP companion binary requires unsandboxed execution).
 
 ## License
