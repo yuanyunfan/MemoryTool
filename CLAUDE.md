@@ -57,6 +57,11 @@ open MemoryTool.xcodeproj      # Open in Xcode (if using .xcodeproj)
 5. **Update phase status** — if all features in phase pass, set status to "done"
 6. **Update summary** — recalculate done/remaining/progress_pct
 
+### After parallel Agent execution:
+> When multiple subagents complete work in parallel, the main agent MUST
+> immediately update tracking files before responding to the next user request.
+> Subagents cannot update feature_list.json themselves — this is the main agent's responsibility.
+
 ### Before session ends — must execute:
 7. **Update `claude-progress.txt`** — record completions, next steps, issues encountered
 8. **Update `CHANGELOG.md`** — if significant functionality completed
