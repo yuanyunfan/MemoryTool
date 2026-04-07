@@ -29,7 +29,7 @@ public final class MemoryService: Sendable {
     /// Uses cosine similarity > 0.85 threshold to detect paraphrases
     /// (e.g. "我爱吃火锅" vs "用户爱吃火锅").
     public func checkDuplicate(content: String) throws -> DeduplicationResult {
-        guard let embeddingService, let queryVec = embeddingService.embed(content) else {
+        guard let embeddingService, let queryVec = embeddingService.embed(content, isQuery: false) else {
             return .noDuplicate
         }
 
@@ -62,7 +62,7 @@ public final class MemoryService: Sendable {
         metadata: String? = nil
     ) throws -> Memory {
         // Generate embedding
-        let embeddingData = embeddingService?.embed(content)
+        let embeddingData = embeddingService?.embed(content, isQuery: false)
             .map { EmbeddingService.encodeEmbedding($0) }
 
         let memory = Memory(
@@ -110,7 +110,7 @@ public final class MemoryService: Sendable {
             if let content {
                 memory.content = content
                 // Regenerate embedding for updated content
-                memory.embedding = embeddingService?.embed(content)
+                memory.embedding = embeddingService?.embed(content, isQuery: false)
                     .map { EmbeddingService.encodeEmbedding($0) }
             }
             if let category { memory.category = category }
@@ -554,7 +554,7 @@ public final class MemoryService: Sendable {
 
         var count = 0
         for memory in memories {
-            if let vector = embeddingService.embed(memory.content) {
+            if let vector = embeddingService.embed(memory.content, isQuery: false) {
                 let data = EmbeddingService.encodeEmbedding(vector)
                 try db.writer().write { dbConn in
                     try dbConn.execute(

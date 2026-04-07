@@ -46,11 +46,11 @@ do {
 
     // Initialize embedding service for semantic search
     let embeddingService = EmbeddingService()
-    await embeddingService.loadModels()
+    await embeddingService.loadModel()
     if embeddingService.isAvailable {
-        logToStderr("Embedding models loaded (dimension: \(embeddingService.dimension))")
+        logToStderr("Embedding model loaded (multilingual-e5-small, \(EmbeddingService.dimension)-dim)")
     } else {
-        logToStderr("Embedding models not available — semantic search disabled, keyword search only")
+        logToStderr("Embedding model not available — semantic search disabled, keyword search only")
     }
 
     let service = MemoryService(database: database, embeddingService: embeddingService)

@@ -1,92 +1,85 @@
 import Accelerate
+import Embeddings
 import Foundation
-import NaturalLanguage
 
-/// Provides text embedding and vector similarity search using Apple's NLContextualEmbedding.
+/// Provides multilingual text embedding using `intfloat/multilingual-e5-small`.
 ///
-/// Uses system-built-in BERT models — zero external dependencies, zero model downloads.
-/// Supports both English (Latin script) and Chinese (Han script).
+/// Single model, single vector space for 100+ languages — Chinese and English
+/// queries find each other naturally. Uses XLM-RoBERTa architecture via
+/// `swift-embeddings`.
+///
+/// Important: e5 models require prefixes:
+/// - "query: " for search queries
+/// - "passage: " for stored content
 public final class EmbeddingService: @unchecked Sendable {
-    /// Embedding dimension (768 on macOS).
-    public private(set) var dimension: Int = 768
+    /// Embedding dimension (384 for multilingual-e5-small).
+    public static let dimension: Int = 384
 
-    /// Whether the embedding model is ready to use.
+    /// Whether the embedding model is loaded and ready.
     public private(set) var isAvailable: Bool = false
 
-    private var latinEmbedding: NLContextualEmbedding?
-    private var hanEmbedding: NLContextualEmbedding?
+    private var modelBundle: XLMRoberta.ModelBundle?
+
+    /// HuggingFace model identifier.
+    private let modelId = "intfloat/multilingual-e5-small"
 
     public init() {}
 
     // MARK: - Setup
 
-    /// Load embedding models. Call once at startup.
-    public func loadModels() async {
-        // Try to load Latin (English) model
-        if let latin = NLContextualEmbedding(script: .latin) {
-            do {
-                try latin.load()
-                self.latinEmbedding = latin
-                self.dimension = latin.dimension
-                self.isAvailable = true
-            } catch {
-                logToStderr("EmbeddingService: Failed to load Latin model: \(error)")
-            }
-        }
-
-        // Try to load Han (Chinese) model
-        if let han = NLContextualEmbedding(script: .simplifiedChinese) {
-            do {
-                try han.load()
-                self.hanEmbedding = han
-                self.isAvailable = true
-            } catch {
-                logToStderr("EmbeddingService: Failed to load Han model: \(error)")
-            }
-        }
-
-        if !isAvailable {
-            logToStderr("EmbeddingService: No embedding models available. Semantic search disabled.")
+    /// Load the multilingual embedding model.
+    ///
+    /// First call downloads ~460MB from HuggingFace (cached for subsequent runs).
+    /// Subsequent calls load from cache in ~2-5 seconds.
+    public func loadModel() async {
+        do {
+            modelBundle = try await XLMRoberta.loadModelBundle(from: modelId)
+            isAvailable = true
+            logToStderr("EmbeddingService: Model loaded successfully (\(modelId), \(Self.dimension)-dim)")
+        } catch {
+            logToStderr("EmbeddingService: Failed to load model: \(error)")
+            isAvailable = false
         }
     }
 
     // MARK: - Embedding Generation
 
-    /// Generate a sentence embedding by mean-pooling token embeddings.
+    /// Generate an embedding for a text string.
     ///
-    /// Automatically detects language and uses the appropriate model.
-    /// Returns nil if no suitable model is available or embedding fails.
-    public func embed(_ text: String) -> [Float]? {
-        guard isAvailable else { return nil }
+    /// - Parameters:
+    ///   - text: The text to embed.
+    ///   - isQuery: If true, prefixes with "query: " (for search).
+    ///              If false, prefixes with "passage: " (for storage).
+    /// - Returns: L2-normalized 384-dim Float array, or nil if model unavailable.
+    public func embed(_ text: String, isQuery: Bool = true) -> [Float]? {
+        guard let modelBundle, isAvailable else { return nil }
 
-        let model = selectModel(for: text)
-        guard let model else { return nil }
+        let prefix = isQuery ? "query: " : "passage: "
+        let prefixedText = prefix + text
 
-        let language = detectLanguage(text)
+        // swift-embeddings encode returns MLTensor; shapedArray is async,
+        // so we bridge to sync via a semaphore for use in non-async contexts.
+        nonisolated(unsafe) var result: [Float]?
+        let semaphore = DispatchSemaphore(value: 0)
 
-        guard let result = try? model.embeddingResult(for: text, language: language) else {
-            return nil
-        }
-
-        // Mean pooling: average all token vectors
-        var sum = [Double](repeating: 0.0, count: model.dimension)
-        var tokenCount = 0
-
-        result.enumerateTokenVectors(
-            in: text.startIndex..<text.endIndex
-        ) { vector, _ in
-            for i in 0..<min(vector.count, sum.count) {
-                sum[i] += vector[i]
+        Task { @Sendable in
+            do {
+                let encoded = try modelBundle.encode(prefixedText)
+                let shaped = await encoded.cast(to: Float.self).shapedArray(of: Float.self)
+                let vector = Array(shaped.scalars)
+                if vector.count == Self.dimension {
+                    result = self.l2Normalize(vector)
+                } else {
+                    logToStderr("EmbeddingService: Unexpected dimension \(vector.count), expected \(Self.dimension)")
+                }
+            } catch {
+                logToStderr("EmbeddingService: Embedding failed: \(error)")
             }
-            tokenCount += 1
-            return true
+            semaphore.signal()
         }
 
-        guard tokenCount > 0 else { return nil }
-
-        // Normalize to unit vector for cosine similarity
-        let mean = sum.map { Float($0 / Double(tokenCount)) }
-        return l2Normalize(mean)
+        semaphore.wait()
+        return result
     }
 
     /// Encode embedding to Data for SQLite BLOB storage.
@@ -106,24 +99,15 @@ public final class EmbeddingService: @unchecked Sendable {
 
     // MARK: - Vector Search
 
-    /// Compute cosine similarity between two vectors.
-    /// Both vectors should already be L2-normalized (returns dot product).
+    /// Compute cosine similarity between two L2-normalized vectors (= dot product).
     public static func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
         guard a.count == b.count, !a.isEmpty else { return 0 }
-
         var dot: Float = 0
         vDSP_dotpr(a, 1, b, 1, &dot, vDSP_Length(a.count))
         return dot
     }
 
     /// Search for the most similar vectors.
-    ///
-    /// - Parameters:
-    ///   - query: The query embedding vector (must be L2-normalized).
-    ///   - candidates: Array of (id, embedding) pairs to search through.
-    ///   - topK: Number of results to return.
-    ///   - threshold: Minimum similarity score (0.0 to 1.0).
-    /// - Returns: Array of (id, similarity) sorted by descending similarity.
     public static func search(
         query: [Float],
         candidates: [(id: String, embedding: [Float])],
@@ -140,27 +124,11 @@ public final class EmbeddingService: @unchecked Sendable {
 
     // MARK: - Private
 
-    private func selectModel(for text: String) -> NLContextualEmbedding? {
-        let lang = NLLanguageRecognizer.dominantLanguage(for: text)
-
-        switch lang {
-        case .simplifiedChinese, .traditionalChinese, .japanese, .korean:
-            return hanEmbedding ?? latinEmbedding
-        default:
-            return latinEmbedding ?? hanEmbedding
-        }
-    }
-
-    private func detectLanguage(_ text: String) -> NLLanguage? {
-        NLLanguageRecognizer.dominantLanguage(for: text)
-    }
-
     private func l2Normalize(_ vector: [Float]) -> [Float] {
         var sumOfSquares: Float = 0
         vDSP_svesq(vector, 1, &sumOfSquares, vDSP_Length(vector.count))
         let norm = sqrt(sumOfSquares)
         guard norm > 0 else { return vector }
-
         var result = [Float](repeating: 0, count: vector.count)
         var divisor = norm
         vDSP_vsdiv(vector, 1, &divisor, &result, 1, vDSP_Length(vector.count))
