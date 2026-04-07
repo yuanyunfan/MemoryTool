@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import GRDB
 
@@ -187,6 +188,48 @@ public final class AppDatabase: Sendable {
                     VALUES (NEW.rowid, NEW.content, NEW.category, NEW.source);
                 END
                 """)
+        }
+
+        // v3: Deduplication, ranking weights, semantic embedding
+        migrator.registerMigration("v3_dedup_rank_embed") { db in
+            // Content hash for fast deduplication
+            try db.alter(table: "memory") { t in
+                t.add(column: "content_hash", .text)
+            }
+
+            // Access tracking for ranking weights
+            try db.alter(table: "memory") { t in
+                t.add(column: "access_count", .integer).notNull().defaults(to: 0)
+            }
+            try db.alter(table: "memory") { t in
+                t.add(column: "last_accessed_at", .datetime)
+            }
+
+            // Semantic embedding vector (stored as raw bytes)
+            try db.alter(table: "memory") { t in
+                t.add(column: "embedding", .blob)
+            }
+
+            // Backfill content_hash for existing memories
+            let rows = try Row.fetchAll(db, sql: "SELECT id, content FROM memory")
+            for row in rows {
+                let id: String = row["id"]
+                let content: String = row["content"]
+                let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let hash = SHA256.hash(data: Data(normalized.utf8))
+                    .map { String(format: "%02x", $0) }.joined()
+                try db.execute(
+                    sql: "UPDATE memory SET content_hash = ? WHERE id = ?",
+                    arguments: [hash, id]
+                )
+            }
+
+            // Index on content_hash for fast duplicate lookups
+            try db.create(
+                index: "idx_memory_content_hash",
+                on: "memory",
+                columns: ["content_hash"]
+            )
         }
 
         return migrator

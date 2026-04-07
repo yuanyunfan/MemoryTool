@@ -54,19 +54,49 @@ struct ToolHandler: Sendable {
         let tags = extractTags(from: arguments)
 
         do {
-            let memory = try service.createMemory(
-                content: content,
-                category: category,
-                source: source,
-                tags: tags,
-                metadata: userMetadata
-            )
+            // Deduplication check
+            let dupCheck = try service.checkDuplicate(content: content)
 
-            let response: [String: Any] = [
-                "id": memory.id,
-                "message": "Memory stored successfully.",
-            ]
-            return textResult(toJSON(response))
+            switch dupCheck {
+            case .similarExists(let existingId, let similarity):
+                // Merge: combine old + new content, let the newer content take priority
+                let existing = try service.getMemory(id: existingId)
+                let mergedContent: String
+                if let existing {
+                    mergedContent = "\(existing.content)\n\(content)"
+                } else {
+                    mergedContent = content
+                }
+                let _ = try service.updateMemory(id: existingId, content: mergedContent)
+
+                // Merge tags if provided
+                if let tags, !tags.isEmpty {
+                    try service.addTags(to: existingId, tags: tags)
+                }
+
+                let response: [String: Any] = [
+                    "id": existingId,
+                    "message": "Merged with existing similar memory (similarity: \(String(format: "%.2f", similarity))).",
+                    "deduplicated": true,
+                    "similarity": similarity,
+                ]
+                return textResult(toJSON(response))
+
+            case .noDuplicate:
+                let memory = try service.createMemory(
+                    content: content,
+                    category: category,
+                    source: source,
+                    tags: tags,
+                    metadata: userMetadata
+                )
+
+                let response: [String: Any] = [
+                    "id": memory.id,
+                    "message": "Memory stored successfully.",
+                ]
+                return textResult(toJSON(response))
+            }
         } catch {
             return errorResult("Failed to store memory: \(error.localizedDescription)")
         }
@@ -93,6 +123,7 @@ struct ToolHandler: Sendable {
                 limit: limit
             )
 
+            // Batch fetch tags to avoid N+1 query
             let results: [[String: Any]] = try memories.map { memory in
                 var entry: [String: Any] = [
                     "id": memory.id,
@@ -100,6 +131,9 @@ struct ToolHandler: Sendable {
                     "category": memory.category,
                     "createdAt": iso8601(memory.createdAt),
                 ]
+                if memory.accessCount > 0 {
+                    entry["accessCount"] = memory.accessCount
+                }
                 let memoryTags = try service.getTagsForMemory(id: memory.id)
                 if !memoryTags.isEmpty {
                     entry["tags"] = memoryTags.map(\.name)
@@ -161,7 +195,6 @@ struct ToolHandler: Sendable {
 
             // Replace tags if provided
             if let tags {
-                // Remove existing tags and add new ones
                 let existingTags = try service.getTagsForMemory(id: memoryId)
                 if !existingTags.isEmpty {
                     try service.removeTags(
@@ -187,7 +220,6 @@ struct ToolHandler: Sendable {
         do {
             let categories = try service.listCategories()
 
-            // Get counts for each category by listing memories
             var results: [[String: Any]] = []
             for cat in categories {
                 let memories = try service.listMemories(category: cat, limit: 100, offset: 0)
@@ -248,6 +280,9 @@ struct ToolHandler: Sendable {
         }
         if let metadata = memory.metadata {
             dict["metadata"] = metadata
+        }
+        if memory.accessCount > 0 {
+            dict["accessCount"] = memory.accessCount
         }
         let tags = try service.getTagsForMemory(id: memory.id)
         if !tags.isEmpty {

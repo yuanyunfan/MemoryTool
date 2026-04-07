@@ -10,6 +10,10 @@ public struct Memory: Codable, Identifiable, Sendable, Equatable {
     public var createdAt: Date
     public var updatedAt: Date
     public var metadata: String?
+    public var contentHash: String?
+    public var accessCount: Int
+    public var lastAccessedAt: Date?
+    public var embedding: Data?
 
     /// Full initializer with all fields.
     public init(
@@ -19,7 +23,11 @@ public struct Memory: Codable, Identifiable, Sendable, Equatable {
         source: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
-        metadata: String? = nil
+        metadata: String? = nil,
+        contentHash: String? = nil,
+        accessCount: Int = 0,
+        lastAccessedAt: Date? = nil,
+        embedding: Data? = nil
     ) {
         self.id = id
         self.content = content
@@ -28,6 +36,10 @@ public struct Memory: Codable, Identifiable, Sendable, Equatable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.metadata = metadata
+        self.contentHash = contentHash
+        self.accessCount = accessCount
+        self.lastAccessedAt = lastAccessedAt
+        self.embedding = embedding
     }
 
     // MARK: - CodingKeys (snake_case column mapping)
@@ -40,6 +52,10 @@ public struct Memory: Codable, Identifiable, Sendable, Equatable {
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case metadata
+        case contentHash = "content_hash"
+        case accessCount = "access_count"
+        case lastAccessedAt = "last_accessed_at"
+        case embedding
     }
 }
 

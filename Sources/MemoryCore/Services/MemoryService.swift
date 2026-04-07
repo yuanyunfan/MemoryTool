@@ -7,14 +7,52 @@ import GRDB
 /// All write operations run inside transactions.
 public final class MemoryService: Sendable {
     let db: AppDatabase
+    private let embeddingService: EmbeddingService?
 
-    public init(database: AppDatabase) {
+    public init(database: AppDatabase, embeddingService: EmbeddingService? = nil) {
         self.db = database
+        self.embeddingService = embeddingService
+    }
+
+    // MARK: - Deduplication
+
+    /// Result of a deduplication check.
+    public enum DeduplicationResult: Sendable {
+        /// No duplicate found — safe to create.
+        case noDuplicate
+        /// Similar content found (similarity score).
+        case similarExists(existingId: String, similarity: Float)
+    }
+
+    /// Check if content is semantically similar to existing memories.
+    ///
+    /// Uses cosine similarity > 0.85 threshold to detect paraphrases
+    /// (e.g. "我爱吃火锅" vs "用户爱吃火锅").
+    public func checkDuplicate(content: String) throws -> DeduplicationResult {
+        guard let embeddingService, let queryVec = embeddingService.embed(content) else {
+            return .noDuplicate
+        }
+
+        let candidates = try loadEmbeddings()
+        let results = EmbeddingService.search(
+            query: queryVec,
+            candidates: candidates,
+            topK: 1,
+            threshold: 0.85
+        )
+        if let top = results.first {
+            return .similarExists(existingId: top.id, similarity: top.similarity)
+        }
+
+        return .noDuplicate
     }
 
     // MARK: - CRUD
 
-    /// Creates a new memory, optionally with tags.
+    /// Creates a new memory with semantic deduplication.
+    ///
+    /// If a semantically similar memory exists (cosine > 0.85),
+    /// updates the existing memory instead of creating a duplicate.
     @discardableResult
     public func createMemory(
         content: String,
@@ -23,11 +61,18 @@ public final class MemoryService: Sendable {
         tags: [String]? = nil,
         metadata: String? = nil
     ) throws -> Memory {
+        // Generate embedding
+        let embeddingData = embeddingService?.embed(content)
+            .map { EmbeddingService.encodeEmbedding($0) }
+
         let memory = Memory(
             content: content,
             category: category,
             source: source,
-            metadata: metadata
+            metadata: metadata,
+            accessCount: 0,
+            lastAccessedAt: nil,
+            embedding: embeddingData
         )
 
         try db.writer().write { dbConn in
@@ -57,12 +102,17 @@ public final class MemoryService: Sendable {
         source: String? = nil,
         metadata: String? = nil
     ) throws -> Memory? {
-        try db.writer().write { dbConn in
+        let result: Memory? = try db.writer().write { dbConn -> Memory? in
             guard var memory = try Memory.fetchOne(dbConn, key: id) else {
                 return nil
             }
 
-            if let content { memory.content = content }
+            if let content {
+                memory.content = content
+                // Regenerate embedding for updated content
+                memory.embedding = embeddingService?.embed(content)
+                    .map { EmbeddingService.encodeEmbedding($0) }
+            }
             if let category { memory.category = category }
             if let source { memory.source = source }
             if let metadata { memory.metadata = metadata }
@@ -71,6 +121,7 @@ public final class MemoryService: Sendable {
             try memory.update(dbConn)
             return memory
         }
+        return result
     }
 
     /// Deletes a memory by ID. Returns true if a record was actually deleted.
@@ -85,13 +136,53 @@ public final class MemoryService: Sendable {
         }
     }
 
-    // MARK: - Search
+    // MARK: - Access Tracking (Ranking Weights)
 
-    /// Full-text search using FTS5 with LIKE fallback for short terms.
+    /// Record an access to a memory, incrementing access_count and updating last_accessed_at.
+    public func recordAccess(id: String) throws {
+        try db.writer().write { dbConn in
+            try dbConn.execute(
+                sql: """
+                    UPDATE memory
+                    SET access_count = access_count + 1,
+                        last_accessed_at = ?
+                    WHERE id = ?
+                    """,
+                arguments: [Date(), id]
+            )
+        }
+    }
+
+    /// Record access for multiple memories at once.
+    public func recordAccess(ids: [String]) throws {
+        guard !ids.isEmpty else { return }
+        try db.writer().write { dbConn in
+            for id in ids {
+                try dbConn.execute(
+                    sql: """
+                        UPDATE memory
+                        SET access_count = access_count + 1,
+                            last_accessed_at = ?
+                        WHERE id = ?
+                        """,
+                    arguments: [Date(), id]
+                )
+            }
+        }
+    }
+
+    // MARK: - Search (Hybrid: FTS5 + Semantic + Ranking)
+
+    /// Hybrid search combining keyword (FTS5), semantic (embedding), and ranking weights.
     ///
-    /// FTS5 trigram tokenizer requires ≥3 characters per term. For shorter
-    /// terms (common in CJK, e.g. "火锅") we fall back to SQL LIKE.
-    /// Multiple terms use OR semantics — matching *any* term is enough.
+    /// Scoring formula:
+    ///   `final_score = w_keyword * keyword_score + w_semantic * semantic_score + w_recency * recency_score + w_frequency * frequency_score`
+    ///
+    /// Where:
+    ///   - keyword_score: FTS5 rank normalized to [0, 1]
+    ///   - semantic_score: cosine similarity [0, 1]
+    ///   - recency_score: exponential decay based on age (half-life = 30 days)
+    ///   - frequency_score: log(1 + access_count) / log(1 + max_access_count)
     public func searchMemories(
         query: String,
         category: String? = nil,
@@ -101,17 +192,158 @@ public final class MemoryService: Sendable {
         let effectiveLimit = min(max(limit, 1), 100)
         let terms = extractSearchTerms(query)
 
-        // If no terms after sanitization, fall back to list
-        guard !terms.isEmpty else {
+        // If no query, fall back to listing
+        guard !terms.isEmpty || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return try listMemories(category: category, limit: effectiveLimit, offset: 0)
         }
 
-        // Split terms: trigram FTS5 needs ≥3 chars, shorter ones use LIKE
+        // Phase 1: Keyword search (FTS5 + LIKE)
+        let keywordResults = try keywordSearch(
+            terms: terms,
+            category: category,
+            tags: tags,
+            limit: effectiveLimit * 3 // Fetch more for re-ranking
+        )
+
+        // Phase 2: Semantic search (if embedding available)
+        var semanticScores: [String: Float] = [:]
+        if let embeddingService, let queryVec = embeddingService.embed(query) {
+            let candidates = try loadEmbeddings(category: category, tags: tags)
+            let semanticResults = EmbeddingService.search(
+                query: queryVec,
+                candidates: candidates,
+                topK: effectiveLimit * 3,
+                threshold: 0.3
+            )
+            for result in semanticResults {
+                semanticScores[result.id] = result.similarity
+            }
+        }
+
+        // Phase 3: Merge and rank
+        let allIds = Set(keywordResults.map(\.memory.id))
+            .union(Set(semanticScores.keys))
+
+        // Load full memories for semantic-only results
+        var memoriesById: [String: Memory] = [:]
+        for kr in keywordResults {
+            memoriesById[kr.memory.id] = kr.memory
+        }
+        for id in semanticScores.keys where memoriesById[id] == nil {
+            if let memory = try getMemory(id: id) {
+                memoriesById[id] = memory
+            }
+        }
+
+        // Build keyword score map (normalize FTS5 rank to [0, 1])
+        var keywordScores: [String: Float] = [:]
+        if !keywordResults.isEmpty {
+            let minRank = keywordResults.map(\.rank).min() ?? 0
+            let maxRank = keywordResults.map(\.rank).max() ?? 0
+            let range = maxRank - minRank
+            for kr in keywordResults {
+                // FTS5 rank is negative (more negative = better match)
+                // Normalize so best match = 1.0
+                if range > 0 {
+                    keywordScores[kr.memory.id] = Float(1.0 - (kr.rank - minRank) / range)
+                } else {
+                    keywordScores[kr.memory.id] = 1.0
+                }
+            }
+        }
+
+        // Compute max access count for frequency normalization
+        let maxAccessCount = memoriesById.values.map(\.accessCount).max() ?? 1
+
+        // Score and rank all candidates
+        var scored: [(memory: Memory, score: Float)] = []
+        for id in allIds {
+            guard let memory = memoriesById[id] else { continue }
+
+            let kScore = keywordScores[id] ?? 0.0
+            let sScore = semanticScores[id] ?? 0.0
+
+            // Recency score: exponential decay, half-life = 30 days
+            let ageInDays = Float(-memory.createdAt.timeIntervalSinceNow / 86400.0)
+            let recencyScore = exp(-0.693 * ageInDays / 30.0) // ln(2)/30 ≈ 0.0231
+
+            // Frequency score: log-normalized access count
+            let freqScore: Float
+            if maxAccessCount > 0 {
+                freqScore = log(1.0 + Float(memory.accessCount)) / log(1.0 + Float(maxAccessCount))
+            } else {
+                freqScore = 0.0
+            }
+
+            // Weighted combination
+            let hasKeyword = kScore > 0
+            let hasSemantic = sScore > 0
+
+            let finalScore: Float
+            if hasKeyword && hasSemantic {
+                // Both signals available — balanced weights
+                finalScore = 0.35 * kScore + 0.35 * sScore + 0.15 * recencyScore + 0.15 * freqScore
+            } else if hasKeyword {
+                // Keyword only — give it more weight
+                finalScore = 0.55 * kScore + 0.25 * recencyScore + 0.20 * freqScore
+            } else {
+                // Semantic only
+                finalScore = 0.55 * sScore + 0.25 * recencyScore + 0.20 * freqScore
+            }
+
+            scored.append((memory: memory, score: finalScore))
+        }
+
+        scored.sort { $0.score > $1.score }
+
+        let results = Array(scored.prefix(effectiveLimit).map(\.memory))
+
+        // Record access for returned results
+        try? recordAccess(ids: results.map(\.id))
+
+        return results
+    }
+
+    /// Lists memories with optional category filter and pagination.
+    public func listMemories(
+        category: String? = nil,
+        limit: Int = 20,
+        offset: Int = 0
+    ) throws -> [Memory] {
+        let effectiveLimit = min(max(limit, 1), 100)
+
+        return try db.reader().read { dbConn in
+            var request = Memory.order(Column("created_at").desc)
+
+            if let category {
+                request = request.filter(Column("category") == category)
+            }
+
+            return try request
+                .limit(effectiveLimit, offset: offset)
+                .fetchAll(dbConn)
+        }
+    }
+
+    // MARK: - Keyword Search (internal)
+
+    private struct KeywordResult {
+        let memory: Memory
+        let rank: Double
+    }
+
+    private func keywordSearch(
+        terms: [String],
+        category: String?,
+        tags: [String]?,
+        limit: Int
+    ) throws -> [KeywordResult] {
+        guard !terms.isEmpty else { return [] }
+
         let ftsTerms = terms.filter { $0.count >= 3 }
         let likeTerms = terms.filter { $0.count < 3 }
 
         return try db.reader().read { dbConn in
-            // Build UNION of FTS5 hits and LIKE hits
             var unionParts: [String] = []
             var arguments: [any DatabaseValueConvertible] = []
 
@@ -135,10 +367,10 @@ public final class MemoryService: Sendable {
                 arguments.append("%\(term)%")
             }
 
-            // Wrap in a deduplication layer (GROUP BY keeps best rank per memory)
             let innerSQL = unionParts.joined(separator: " UNION ALL ")
             var sql = """
                 SELECT id, content, category, source, created_at, updated_at, metadata,
+                       content_hash, access_count, last_accessed_at, embedding,
                        MIN(search_rank) AS best_rank
                 FROM (\(innerSQL))
                 WHERE 1=1
@@ -165,34 +397,60 @@ public final class MemoryService: Sendable {
             }
 
             sql += " GROUP BY id ORDER BY best_rank LIMIT ?"
-            arguments.append(effectiveLimit)
+            arguments.append(limit)
 
-            return try Memory.fetchAll(
+            let rows = try Row.fetchAll(
                 dbConn,
                 sql: sql,
                 arguments: StatementArguments(arguments)
             )
+
+            return rows.compactMap { row -> KeywordResult? in
+                guard let memory = try? Memory(row: row) else { return nil }
+                let rank: Double = row["best_rank"] ?? 0.0
+                return KeywordResult(memory: memory, rank: rank)
+            }
         }
     }
 
-    /// Lists memories with optional category filter and pagination.
-    public func listMemories(
-        category: String? = nil,
-        limit: Int = 20,
-        offset: Int = 0
-    ) throws -> [Memory] {
-        let effectiveLimit = min(max(limit, 1), 100)
+    // MARK: - Embedding Helpers
 
-        return try db.reader().read { dbConn in
-            var request = Memory.order(Column("created_at").desc)
+    /// Load all embeddings from database for vector search.
+    private func loadEmbeddings(
+        category: String? = nil,
+        tags: [String]? = nil
+    ) throws -> [(id: String, embedding: [Float])] {
+        try db.reader().read { dbConn in
+            var sql = "SELECT id, embedding FROM memory WHERE embedding IS NOT NULL"
+            var arguments: [any DatabaseValueConvertible] = []
 
             if let category {
-                request = request.filter(Column("category") == category)
+                sql += " AND category = ?"
+                arguments.append(category)
             }
 
-            return try request
-                .limit(effectiveLimit, offset: offset)
-                .fetchAll(dbConn)
+            if let tags, !tags.isEmpty {
+                let placeholders = tags.map { _ in "?" }.joined(separator: ", ")
+                sql += """
+                     AND id IN (
+                        SELECT mt.memory_id FROM memory_tag mt
+                        INNER JOIN tag t ON t.id = mt.tag_id
+                        WHERE t.name IN (\(placeholders))
+                        GROUP BY mt.memory_id
+                        HAVING COUNT(DISTINCT t.name) = ?
+                    )
+                    """
+                for tag in tags { arguments.append(tag) }
+                arguments.append(tags.count)
+            }
+
+            let rows = try Row.fetchAll(dbConn, sql: sql, arguments: StatementArguments(arguments))
+            return rows.compactMap { row -> (id: String, embedding: [Float])? in
+                guard let id: String = row["id"],
+                      let data: Data = row["embedding"]
+                else { return nil }
+                return (id: id, embedding: EmbeddingService.decodeEmbedding(data))
+            }
         }
     }
 
@@ -203,7 +461,6 @@ public final class MemoryService: Sendable {
         guard !tags.isEmpty else { return }
 
         try db.writer().write { dbConn in
-            // Verify memory exists
             guard try Memory.fetchOne(dbConn, key: memoryId) != nil else {
                 return
             }
@@ -277,6 +534,32 @@ public final class MemoryService: Sendable {
         }
     }
 
+    // MARK: - Embedding Management
+
+    /// Generate and store embeddings for all memories that don't have one yet.
+    public func backfillEmbeddings() throws -> Int {
+        guard let embeddingService else { return 0 }
+
+        let memories = try db.reader().read { dbConn in
+            try Memory.filter(Column("embedding") == nil).fetchAll(dbConn)
+        }
+
+        var count = 0
+        for memory in memories {
+            if let vector = embeddingService.embed(memory.content) {
+                let data = EmbeddingService.encodeEmbedding(vector)
+                try db.writer().write { dbConn in
+                    try dbConn.execute(
+                        sql: "UPDATE memory SET embedding = ? WHERE id = ?",
+                        arguments: [data, memory.id]
+                    )
+                }
+                count += 1
+            }
+        }
+        return count
+    }
+
     // MARK: - Private Helpers
 
     /// Insert tags and create join records. Must be called inside a write transaction.
@@ -285,7 +568,6 @@ public final class MemoryService: Sendable {
             let trimmed = tagName.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
 
-            // Find or create tag
             let tag: Tag
             if let existing = try Tag.filter(Column("name") == trimmed).fetchOne(dbConn) {
                 tag = existing
@@ -297,7 +579,6 @@ public final class MemoryService: Sendable {
 
             guard let tagId = tag.id else { continue }
 
-            // Insert join record if not already present
             let exists = try MemoryTag
                 .filter(Column("memory_id") == memoryId && Column("tag_id") == tagId)
                 .fetchOne(dbConn)
@@ -310,14 +591,10 @@ public final class MemoryService: Sendable {
     }
 
     /// Extract and sanitize individual search terms from a raw query string.
-    ///
-    /// Removes FTS5 operators and special characters, then returns each
-    /// whitespace-separated token as a clean term.
     private func extractSearchTerms(_ query: String) -> [String] {
         let ftsOperators = ["AND", "OR", "NOT", "NEAR"]
         var result = query
 
-        // Remove FTS5 operators (case-insensitive whole words)
         for op in ftsOperators {
             let pattern = "\\b\(op)\\b"
             if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
@@ -329,11 +606,9 @@ public final class MemoryService: Sendable {
             }
         }
 
-        // Remove special FTS5 characters
         let specialChars: Set<Character> = ["*", "\"", "(", ")", "{", "}", "^", ":", "+"]
         result = String(result.filter { !specialChars.contains($0) })
 
-        // Split into individual terms, dropping empties
         return result.split(separator: " ").map(String.init).filter { !$0.isEmpty }
     }
 }

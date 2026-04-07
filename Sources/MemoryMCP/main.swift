@@ -43,7 +43,24 @@ logToStderr("Starting...")
 
 do {
     let database = try createDatabase()
-    let service = MemoryService(database: database)
+
+    // Initialize embedding service for semantic search
+    let embeddingService = EmbeddingService()
+    await embeddingService.loadModels()
+    if embeddingService.isAvailable {
+        logToStderr("Embedding models loaded (dimension: \(embeddingService.dimension))")
+    } else {
+        logToStderr("Embedding models not available — semantic search disabled, keyword search only")
+    }
+
+    let service = MemoryService(database: database, embeddingService: embeddingService)
+
+    // Backfill embeddings for existing memories
+    let backfilled = try service.backfillEmbeddings()
+    if backfilled > 0 {
+        logToStderr("Backfilled embeddings for \(backfilled) memories")
+    }
+
     let handler = ToolHandler(service: service)
 
     // Create the MCP Server

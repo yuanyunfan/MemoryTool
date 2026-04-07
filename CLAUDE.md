@@ -175,3 +175,5 @@ Pre-commit checks (sequential, fail-fast):
 ## Retrospective
 
 > Append major lessons learned here. Format: **[Date] Issue**: Root cause -> Fix -> Lesson
+
+**[2026-04-07] Tracking files stuck at 0% after parallel completion**: 4 subagents completed all 27 features in parallel, but feature_list.json was never updated because (1) subagents had no instruction to update it, (2) main agent was pulled into user's next request immediately. -> Added "After parallel Agent execution" rule to Session Workflow. -> **When subagents finish, update tracking BEFORE responding to user's next request.**

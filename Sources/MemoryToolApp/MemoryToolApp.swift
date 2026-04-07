@@ -19,6 +19,7 @@ struct MemoryToolApp: App {
 
         do {
             let database = try AppDatabase.create(path: dbPath)
+            // GUI doesn't need embedding service (MCP handles it)
             self.memoryService = MemoryService(database: database)
         } catch {
             fatalError("Failed to initialize database at \(dbPath): \(error)")

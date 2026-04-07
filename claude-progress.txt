@@ -1,60 +1,51 @@
 # MemoryTool — Progress Log
 # Update this file at the end of every Claude Code session. Read it at the start of the next session.
 
-## Current Status: V1.0 Complete ✅
+## Current Status: V1.1 — Dedup + Ranking + Semantic Search ✅
 
 ## Completed ✅
 
-### Phase 0: Project Scaffolding — DONE
-- [x] Package.swift with 3 targets (MemoryCore, MemoryToolApp, MemoryMCP)
-- [x] GRDB.swift + swift-sdk dependency integration
-- [x] Basic project structure (Sources/, Tests/)
-- [x] .gitignore for Swift/Xcode
-- [x] swift build succeeds with zero warnings
+### Phase 0-4: V1.0 Core — DONE (27/27 features)
 
-### Phase 1: Core Data Layer (MemoryCore) — DONE
-- [x] SQLite database setup with GRDB (WAL mode, 3 migrations)
-- [x] Memory model + GRDB Record conformance (Codable, Sendable)
-- [x] Tag model + memory_tag join table (many-to-many)
-- [x] FTS5 virtual table with trigram tokenizer (CJK support)
-- [x] MemoryService with CRUD + search + filter API
-- [x] 62 unit tests passing
-
-### Phase 2: MCP Server (MemoryMCP) — DONE
-- [x] stdio transport setup with swift-sdk 0.12.0
-- [x] All 6 tools: remember, recall, forget, update_memory, list_categories, get_memory
-- [x] ToolHandler dispatching, input validation, error handling
-- [x] MCP server integration tests
-
-### Phase 3: SwiftUI App (MemoryToolApp) — DONE
-- [x] NavigationSplitView (sidebar + list + detail)
-- [x] Memory list with search, context menu, swipe-to-delete
-- [x] Memory detail/edit view
-- [x] Create new memory sheet
-- [x] Delete with confirmation
-- [x] Tag/category sidebar
-- [x] Settings + export/import in File menu
-
-### Phase 4: Integration & Polish — DONE
-- [x] MCPConfigInstaller for Claude Code settings
-- [x] Data export/import (JSON + Markdown)
-- [x] Error handling throughout
-- [x] End-to-end tested (62 tests)
-
-## In Progress 🔄
-（暂无 — V1 完成，等待用户下一步指示）
-
-## Not Started ⏳
-- 可能的 V2 方向：vector search、menu bar quick-access、iCloud sync
+### Phase 5: Intelligence Upgrade — DONE
+- [x] **去重 (Deduplication)**
+  - SHA-256 content hash (normalized: trim + lowercase)
+  - content_hash 列 + idx_memory_content_hash 索引
+  - remember 时自动检测精确重复 → 返回已有记忆 ID
+  - 语义近似检测 (cosine similarity > 0.92) → 自动更新已有记忆
+  - 迁移自动 backfill 已有记忆的 hash
+- [x] **排序权重 (Ranking Weights)**
+  - access_count + last_accessed_at 列
+  - recall 自动记录访问，递增 access_count
+  - 混合排序: keyword_score + semantic_score + recency_decay(半衰期30天) + frequency_score
+  - 四权重公式: 0.35*keyword + 0.35*semantic + 0.15*recency + 0.15*frequency
+- [x] **语义匹配 (Semantic Search)**
+  - Apple NLContextualEmbedding (系统内置，零外部依赖)
+  - 支持 Latin (英文) + SimplifiedChinese (中文) 双模型
+  - 768 维 embedding，L2 归一化存储
+  - embedding BLOB 列，remember 时自动生成
+  - MCP 启动时自动 backfill 已有记忆的 embedding
+  - Accelerate vDSP 硬件加速余弦相似度
+  - Hybrid search: FTS5 关键词 + 向量语义 → 混合排序
 
 ## Architecture Notes
 
 - **Shared SQLite**: GUI and MCP server are separate processes sharing one .db file via WAL mode
-- **MCP Transport**: stdio only (V1). Claude Code spawns MemoryMCP as subprocess
+- **MCP Transport**: stdio only. Claude Code spawns MemoryMCP as subprocess
 - **No print() in MCP target**: stdout is MCP protocol channel, use os_log/stderr for debugging
 - **Swift MCP SDK**: official modelcontextprotocol/swift-sdk 0.12.0
 - **DB Library**: GRDB.swift for type-safe SQLite access with FTS5 support
 - **CJK Search**: trigram tokenizer + LIKE fallback for short terms, OR semantics for multi-word
+- **Embedding**: NLContextualEmbedding (system BERT), mean pooling, L2 normalized
+- **Vector Search**: Accelerate vDSP brute-force cosine similarity (sufficient for <10K memories)
+- **Dedup**: SHA-256 hash on normalized content + cosine similarity > 0.92
+
+## Database Schema (V3)
+- memory: id, content, category, source, created_at, updated_at, metadata, content_hash, access_count, last_accessed_at, embedding
+- memory_fts: FTS5 trigram (content, category, source)
+- tag: id, name
+- memory_tag: memory_id, tag_id
 
 ## Session Log
-- **2026-04-07**: Audit confirmed all 27 features complete. Updated tracking files to reflect reality.
+- **2026-04-07 (AM)**: Audit confirmed all 27 V1 features complete. Updated tracking files.
+- **2026-04-07 (PM)**: Implemented V1.1 — deduplication (SHA-256 hash + semantic near-dup), ranking weights (access tracking + 4-factor scoring), semantic search (NLContextualEmbedding + hybrid FTS5/vector). 62 tests passing, zero warnings.
