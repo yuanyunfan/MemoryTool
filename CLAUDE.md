@@ -111,13 +111,16 @@ MemoryTool/
 | Database | SQLite via GRDB.swift | FTS5 built-in, WAL for multi-process, single-file backup |
 | MCP transport | stdio | Standard for Claude Code, zero-config, best performance |
 | App + MCP split | Companion binary in bundle | MCP runs as separate process, shares SQLite |
-| Search V1 | FTS5 keyword search | Covers 80% needs; vector search deferred to V2 |
+| Search | FTS5 keyword + semantic vector hybrid | FTS5 for exact match, NL embedding for semantic similarity, 4-factor weighted ranking |
+| Embedding | multilingual-e5-small (swift-embeddings) | 384-dim, multilingual, runs locally, zero API cost |
+| Deduplication | SHA-256 hash + cosine similarity > 0.85 | Exact dedup via hash, near-dup via embedding similarity |
 | Logging in MCP | os_log / stderr only | stdout is MCP channel, print() would corrupt protocol |
+| Hook integration | Claude Code SessionStart hook | Auto-inject project memories at session start, zero manual recall needed |
 
 ## Data Model
 
 ```sql
--- Core memory table
+-- Core memory table (V3 schema)
 CREATE TABLE memory (
     id TEXT PRIMARY KEY,          -- UUID
     content TEXT NOT NULL,        -- Memory content
@@ -125,11 +128,15 @@ CREATE TABLE memory (
     source TEXT,                  -- Which session/context created it
     created_at TEXT NOT NULL,     -- ISO 8601
     updated_at TEXT NOT NULL,
-    metadata TEXT                 -- JSON blob for extensibility
+    metadata TEXT,                -- JSON blob for extensibility
+    content_hash TEXT,            -- SHA-256 for exact deduplication
+    access_count INTEGER DEFAULT 0,  -- Usage frequency tracking
+    last_accessed_at TEXT,        -- For recency-based ranking
+    embedding BLOB               -- 384-dim float32 vector (multilingual-e5-small)
 );
 
--- FTS5 virtual table for full-text search
-CREATE VIRTUAL TABLE memory_fts USING fts5(content, category, source, content='memory', content_rowid='rowid');
+-- FTS5 virtual table for full-text search (trigram tokenizer for CJK)
+CREATE VIRTUAL TABLE memory_fts USING fts5(content, category, source, content='memory', content_rowid='rowid', tokenize='trigram');
 
 -- Tags for flexible categorization
 CREATE TABLE tag (
