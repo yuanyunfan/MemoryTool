@@ -49,3 +49,11 @@
 ## Session Log
 - **2026-04-07 (AM)**: Audit confirmed all 27 V1 features complete. Updated tracking files.
 - **2026-04-07 (PM)**: Implemented V1.1 — deduplication (SHA-256 hash + semantic near-dup), ranking weights (access tracking + 4-factor scoring), semantic search (NLContextualEmbedding + hybrid FTS5/vector). 62 tests passing, zero warnings.
+- **2026-04-08**: Implemented Claude Code Hook integration for automatic memory management:
+  - SessionStart hook (`~/.claude/hooks/memory-session-start.sh`): auto-queries MemoryMCP via JSON-RPC, injects project-related memories via `hookSpecificOutput.additionalContext`
+  - Discovered Stop hook limitation: no `hookSpecificOutput` support, only `decision: "block"` + `reason`
+  - Session summary moved to CLAUDE.md instructions (Claude self-evaluates what to persist)
+  - Updated `~/.claude/settings.json` with SessionStart hook registration
+  - Updated `~/.claude/CLAUDE.md` with source convention (`project:<name>`) and session summary workflow
+  - Updated project CLAUDE.md: Architecture Decisions table, Data Model schema (V3 fields)
+  - Updated CHANGELOG.md with v0.2.0 entries
