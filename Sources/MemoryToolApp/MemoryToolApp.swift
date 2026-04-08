@@ -3,7 +3,12 @@ import MemoryCore
 
 @main
 struct MemoryToolApp: App {
+    @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.system.rawValue
     private let memoryService: MemoryService
+
+    private var colorScheme: ColorScheme? {
+        (AppearanceMode(rawValue: appearanceMode) ?? .system).colorScheme
+    }
 
     init() {
         // Initialize database at shared path with MCP server
@@ -29,6 +34,7 @@ struct MemoryToolApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(viewModel: MemoryViewModel(service: memoryService))
+                .preferredColorScheme(colorScheme)
         }
         .defaultSize(width: 1000, height: 700)
         .commands {
@@ -43,6 +49,10 @@ struct MemoryToolApp: App {
                 }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
             }
+        }
+
+        Settings {
+            SettingsView()
         }
     }
 
