@@ -614,7 +614,7 @@ public final class MemoryService: Sendable {
             }
         }
 
-        let specialChars: Set<Character> = ["*", "\"", "(", ")", "{", "}", "^", ":", "+"]
+        let specialChars: Set<Character> = ["*", "\"", "(", ")", "{", "}", "^", ":", "+", "-", "~"]
         result = String(result.filter { !specialChars.contains($0) })
 
         return result.split(separator: " ").map(String.init).filter { !$0.isEmpty }
