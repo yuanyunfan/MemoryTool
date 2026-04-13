@@ -11,6 +11,9 @@ import Foundation
 /// Important: e5 models require prefixes:
 /// - "query: " for search queries
 /// - "passage: " for stored content
+///
+/// The model is loaded lazily on first use to avoid ~450MB GPU memory allocation
+/// when no embedding operations are needed (e.g., idle MCP server).
 public final class EmbeddingService: @unchecked Sendable {
     /// Embedding dimension (384 for multilingual-e5-small).
     public static let dimension: Int = 384
@@ -18,10 +21,16 @@ public final class EmbeddingService: @unchecked Sendable {
     /// Whether the embedding model is loaded and ready.
     public private(set) var isAvailable: Bool = false
 
+    /// Whether the model has been loaded (or attempted to load).
+    private var hasAttemptedLoad: Bool = false
+
     private var modelBundle: XLMRoberta.ModelBundle?
 
     /// HuggingFace model identifier.
     private let modelId = "intfloat/multilingual-e5-small"
+
+    /// Mutex for thread-safe lazy loading state management.
+    private let stateMutex = Mutex()
 
     public init() {}
 
@@ -32,19 +41,72 @@ public final class EmbeddingService: @unchecked Sendable {
     /// First call downloads ~460MB from HuggingFace (cached for subsequent runs).
     /// Subsequent calls load from cache in ~2-5 seconds.
     public func loadModel() async {
+        let shouldLoad = stateMutex.withLock {
+            if hasAttemptedLoad { return false }
+            hasAttemptedLoad = true
+            return true
+        }
+        guard shouldLoad else { return }
+
         do {
-            modelBundle = try await XLMRoberta.loadModelBundle(from: modelId)
-            isAvailable = true
+            let bundle = try await XLMRoberta.loadModelBundle(from: modelId)
+            stateMutex.withLock {
+                modelBundle = bundle
+                isAvailable = true
+            }
             logToStderr("EmbeddingService: Model loaded successfully (\(modelId), \(Self.dimension)-dim)")
         } catch {
+            stateMutex.withLock {
+                isAvailable = false
+            }
             logToStderr("EmbeddingService: Failed to load model: \(error)")
-            isAvailable = false
+        }
+    }
+
+    /// Ensure the model is loaded. Call this before embedding operations.
+    /// Thread-safe: only the first caller triggers the actual load.
+    public func ensureLoaded() async {
+        let needsLoad = stateMutex.withLock { !hasAttemptedLoad }
+        if needsLoad {
+            await loadModel()
         }
     }
 
     // MARK: - Embedding Generation
 
-    /// Generate an embedding for a text string.
+    /// Generate an embedding for a text string (async version).
+    ///
+    /// Lazily loads the model on first call.
+    ///
+    /// - Parameters:
+    ///   - text: The text to embed.
+    ///   - isQuery: If true, prefixes with "query: " (for search).
+    ///              If false, prefixes with "passage: " (for storage).
+    /// - Returns: L2-normalized 384-dim Float array, or nil if model unavailable.
+    public func embedAsync(_ text: String, isQuery: Bool = true) async -> [Float]? {
+        await ensureLoaded()
+        guard let modelBundle, isAvailable else { return nil }
+
+        let prefix = isQuery ? "query: " : "passage: "
+        let prefixedText = prefix + text
+
+        do {
+            let encoded = try modelBundle.encode(prefixedText)
+            let shaped = await encoded.cast(to: Float.self).shapedArray(of: Float.self)
+            let vector = Array(shaped.scalars)
+            if vector.count == Self.dimension {
+                return l2Normalize(vector)
+            } else {
+                logToStderr("EmbeddingService: Unexpected dimension \(vector.count), expected \(Self.dimension)")
+                return nil
+            }
+        } catch {
+            logToStderr("EmbeddingService: Embedding failed: \(error)")
+            return nil
+        }
+    }
+
+    /// Generate an embedding for a text string (sync version, for backward compatibility).
     ///
     /// - Parameters:
     ///   - text: The text to embed.
@@ -57,8 +119,9 @@ public final class EmbeddingService: @unchecked Sendable {
         let prefix = isQuery ? "query: " : "passage: "
         let prefixedText = prefix + text
 
-        // swift-embeddings encode returns MLTensor; shapedArray is async,
-        // so we bridge to sync via a semaphore for use in non-async contexts.
+        // Use a semaphore to bridge async → sync.
+        // NOTE: This is only safe when called from a non-async context.
+        // Prefer embedAsync() whenever possible.
         nonisolated(unsafe) var result: [Float]?
         let semaphore = DispatchSemaphore(value: 0)
 
@@ -133,6 +196,19 @@ public final class EmbeddingService: @unchecked Sendable {
         var divisor = norm
         vDSP_vsdiv(vector, 1, &divisor, &result, 1, vDSP_Length(vector.count))
         return result
+    }
+}
+
+// MARK: - Mutex (async-safe)
+
+/// A simple unfair lock wrapper that is safe to use from both sync and async contexts.
+private final class Mutex: @unchecked Sendable {
+    private var _lock = os_unfair_lock()
+
+    func withLock<T>(_ body: () -> T) -> T {
+        os_unfair_lock_lock(&_lock)
+        defer { os_unfair_lock_unlock(&_lock) }
+        return body()
     }
 }
 

@@ -218,15 +218,13 @@ struct ToolHandler: Sendable {
 
     private func handleListCategories() throws -> CallTool.Result {
         do {
-            let categories = try service.listCategories()
+            let categoriesWithCounts = try service.listCategoriesWithCounts()
 
-            var results: [[String: Any]] = []
-            for cat in categories {
-                let memories = try service.listMemories(category: cat, limit: 100, offset: 0)
-                results.append([
-                    "category": cat,
-                    "count": memories.count,
-                ])
+            let results: [[String: Any]] = categoriesWithCounts.map { item in
+                [
+                    "category": item.category,
+                    "count": item.count,
+                ]
             }
 
             return textResult(toJSON(results))

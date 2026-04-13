@@ -13,9 +13,20 @@ public final class AppDatabase: Sendable {
     // MARK: - Factory Methods
 
     /// Creates a file-backed database at the given path with WAL mode enabled.
+    ///
+    /// Configures conservative memory limits to reduce per-process footprint
+    /// (important when multiple MemoryMCP instances share the same database).
     public static func create(path: String) throws -> AppDatabase {
         var config = Configuration()
         config.journalMode = .wal
+
+        // Limit SQLite memory usage:
+        // - cache_size: negative value = KB; -4000 = ~4MB page cache (default is ~2MB)
+        // - mmap_size: limit memory-mapped I/O to 32MB (prevents unbounded growth)
+        config.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA cache_size = -4000")
+            try db.execute(sql: "PRAGMA mmap_size = 33554432")
+        }
 
         let dbPool = try DatabasePool(path: path, configuration: config)
         let appDB = AppDatabase(dbWriter: dbPool)

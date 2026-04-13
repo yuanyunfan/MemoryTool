@@ -42,58 +42,132 @@ func createDatabase() throws -> AppDatabase {
 logToStderr("Starting...")
 
 do {
-    let database = try createDatabase()
+    let role = DaemonManager.detectRole()
 
-    // Initialize embedding service for semantic search
-    let embeddingService = EmbeddingService()
-    await embeddingService.loadModel()
-    if embeddingService.isAvailable {
-        logToStderr("Embedding model loaded (multilingual-e5-small, \(EmbeddingService.dimension)-dim)")
-    } else {
-        logToStderr("Embedding model not available — semantic search disabled, keyword search only")
-    }
+    switch role {
+    case .proxy:
+        // ──────────────────────────────────────────────────────
+        // PROXY MODE: Forward stdio ↔ daemon via UDS (~5MB RSS)
+        // ──────────────────────────────────────────────────────
+        logToStderr("Daemon already running, entering proxy mode...")
+        let daemonFd = try DaemonManager.connectToDaemon()
+        await ProxyBridge.run(daemonFd: daemonFd)
+        exit(0)
 
-    let service = MemoryService(database: database, embeddingService: embeddingService)
+    case .daemon:
+        // ──────────────────────────────────────────────────────
+        // DAEMON MODE: Load model + DB, serve stdio + UDS clients
+        // ──────────────────────────────────────────────────────
+        logToStderr("No existing daemon, starting as daemon...")
 
-    // Backfill embeddings for existing memories
-    let backfilled = try service.backfillEmbeddings()
-    if backfilled > 0 {
-        logToStderr("Backfilled embeddings for \(backfilled) memories")
-    }
+        let database = try createDatabase()
 
-    let handler = ToolHandler(service: service)
+        // Initialize embedding service — lazy load (model not loaded yet, ~0 MB).
+        // Model will be loaded on first embed request (~450MB GPU memory).
+        let embeddingService = EmbeddingService()
 
-    // Create the MCP Server
-    let server = Server(
-        name: "MemoryMCP",
-        version: "0.1.0",
-        capabilities: .init(
-            tools: .init(listChanged: false)
+        // Check if MEMORY_TOOL_EAGER_LOAD is set to preload the model
+        if ProcessInfo.processInfo.environment["MEMORY_TOOL_EAGER_LOAD"] != nil {
+            await embeddingService.loadModel()
+            if embeddingService.isAvailable {
+                logToStderr("Embedding model preloaded (multilingual-e5-small, \(EmbeddingService.dimension)-dim)")
+            } else {
+                logToStderr("Embedding model preload failed — semantic search disabled")
+            }
+        } else {
+            logToStderr("Embedding model will be loaded lazily on first use")
+        }
+
+        let service = MemoryService(database: database, embeddingService: embeddingService)
+
+        // Backfill embeddings for existing memories (triggers model load if needed)
+        let backfilled = try service.backfillEmbeddings()
+        if backfilled > 0 {
+            logToStderr("Backfilled embeddings for \(backfilled) memories")
+        }
+
+        let handler = ToolHandler(service: service)
+
+        // Create the MCP Server for this process's own stdio client
+        let server = Server(
+            name: "MemoryMCP",
+            version: "0.1.0",
+            capabilities: .init(
+                tools: .init(listChanged: false)
+            )
         )
-    )
 
-    // Register tools/list handler
-    await server.withMethodHandler(ListTools.self) { _ in
-        .init(tools: ToolDefinitions.allTools)
-    }
+        // Register tools/list handler
+        await server.withMethodHandler(ListTools.self) { _ in
+            .init(tools: ToolDefinitions.allTools)
+        }
 
-    // Register tools/call handler
-    await server.withMethodHandler(CallTool.self) { params in
-        try handler.handle(params)
-    }
+        // Register tools/call handler
+        await server.withMethodHandler(CallTool.self) { params in
+            try handler.handle(params)
+        }
 
-    // Start the server on stdio transport
-    let transport = StdioTransport()
-    logToStderr("Server ready, waiting for connections on stdio...")
-    try await server.start(transport: transport)
+        // Start the MCP server on stdio transport (for this process's own Claude session)
+        let transport = StdioTransport()
+        logToStderr("Server ready, waiting for connections on stdio...")
+        try await server.start(transport: transport)
 
-    // Keep the process alive until the transport disconnects.
-    // StdioTransport will close when stdin reaches EOF.
-    // We use a simple sleep loop; in production consider swift-service-lifecycle.
-    while true {
-        try await Task.sleep(for: .seconds(60))
+        // Start UDS listener for proxy clients
+        let listenFd = try DaemonManager.becomeDaemon()
+        logToStderr("Daemon listening on \(DaemonManager.socketPath)")
+
+        let clientManager = ClientManager(handler: handler)
+
+        // Register cleanup handler
+        let signalSources = [SIGTERM, SIGINT].map { sig -> DispatchSourceSignal in
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler {
+                logToStderr("Received signal \(sig), cleaning up...")
+                DaemonManager.cleanupDaemon()
+                close(listenFd)
+                exit(0)
+            }
+            signal(sig, SIG_IGN) // Ignore default handler
+            source.resume()
+            return source
+        }
+        // Keep signal sources alive
+        _ = signalSources
+
+        // Run UDS accept loop in background
+        Task {
+            await clientManager.acceptLoop(listenFd: listenFd)
+        }
+
+        // Monitor stdin — when it closes, the owning Claude session ended.
+        // But as a daemon, we keep running to serve other proxy clients.
+        // Only exit when there are no more connections AND stdin is closed.
+        Task {
+            // Wait for stdin EOF
+            let stdinFd = FileHandle.standardInput.fileDescriptor
+            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
+            defer { buffer.deallocate() }
+
+            while true {
+                let bytesRead = read(stdinFd, buffer, 1)
+                if bytesRead <= 0 {
+                    logToStderr("Daemon's own stdin closed. Will continue serving proxy clients.")
+                    break
+                }
+                // Discard any data read from stdin after MCP transport handles it.
+                // In practice StdioTransport consumes stdin, so this is just a safety net.
+            }
+        }
+
+        // Keep the process alive. The daemon exits when:
+        // 1. It receives SIGTERM/SIGINT (cleanup handler above)
+        // 2. The accept loop ends (unlikely unless socket error)
+        while true {
+            try await Task.sleep(for: .seconds(3600))
+        }
     }
 } catch {
     logToStderr("Fatal error: \(error)")
+    DaemonManager.cleanupDaemon()
     exit(1)
 }

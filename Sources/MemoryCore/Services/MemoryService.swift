@@ -533,6 +533,19 @@ public final class MemoryService: Sendable {
         }
     }
 
+    /// Returns categories with their memory counts, using a single GROUP BY query.
+    public func listCategoriesWithCounts() throws -> [(category: String, count: Int)] {
+        try db.reader().read { dbConn in
+            let rows = try Row.fetchAll(
+                dbConn,
+                sql: "SELECT category, COUNT(*) AS cnt FROM memory GROUP BY category ORDER BY category"
+            )
+            return rows.map { row in
+                (category: row["category"] as String, count: row["cnt"] as Int)
+            }
+        }
+    }
+
     // MARK: - Stats
 
     /// Returns the total number of memories.

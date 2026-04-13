@@ -23,14 +23,20 @@ MemoryTool.app
 ├── MemoryToolApp (SwiftUI GUI target)
 │   └── Views, ViewModels
 ├── MemoryMCP (CLI executable target, MCP server)
-│   └── Reads/writes same SQLite via stdio
+│   ├── Singleton daemon mode (first instance loads model + DB)
+│   ├── Proxy mode (subsequent instances forward via UDS, ~5MB each)
+│   └── Shared: DaemonManager, ProxyBridge, ClientManager, UDSTransport
 └── MemoryCore (shared library)
     ├── Models (Memory, Tag, etc.)
     ├── Database (GRDB DAOs, migrations)
-    └── Services (MemoryService, SearchService)
+    └── Services (MemoryService, EmbeddingService)
 ```
 
-Key constraint: GUI process and MCP server process share one SQLite file (WAL mode). Never use print() in MCP target — stdout is the MCP communication channel.
+Key constraints:
+- GUI process and MCP server process share one SQLite file (WAL mode)
+- Never use print() in MCP target — stdout is the MCP communication channel
+- Embedding model (~450MB GPU) loaded lazily on first use, shared across all proxy clients
+- Multiple Claude sessions share one daemon process via Unix Domain Socket (~/.memorytool/mcp.sock)
 
 ## Commands
 
@@ -109,7 +115,9 @@ MemoryTool/
 | GUI framework | SwiftUI | Native macOS, best system integration |
 | MCP SDK | Official swift-sdk | Production-grade, maintained by Anthropic |
 | Database | SQLite via GRDB.swift | FTS5 built-in, WAL for multi-process, single-file backup |
-| MCP transport | stdio | Standard for Claude Code, zero-config, best performance |
+| MCP transport | stdio + UDS proxy | stdio for Claude Code, UDS for daemon multiplexing |
+| Multi-instance | Singleton daemon + proxy | First instance loads model (~450MB), others proxy via UDS (~5MB each) |
+| Embedding loading | Lazy (on first use) | Avoids ~450MB GPU memory when no embedding ops needed |
 | App + MCP split | Companion binary in bundle | MCP runs as separate process, shares SQLite |
 | Search | FTS5 keyword + semantic vector hybrid | FTS5 for exact match, NL embedding for semantic similarity, 4-factor weighted ranking |
 | Embedding | multilingual-e5-small (swift-embeddings) | 384-dim, multilingual, runs locally, zero API cost |
