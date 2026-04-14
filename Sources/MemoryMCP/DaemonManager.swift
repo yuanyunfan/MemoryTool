@@ -28,6 +28,12 @@ enum DaemonManager {
         return "\(home)/.memorytool/daemon.pid"
     }()
 
+    /// Path to the lock file used to prevent race conditions during role detection.
+    static let lockFilePath: String = {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return "\(home)/.memorytool/daemon.lock"
+    }()
+
     // MARK: - Role Detection
 
     enum Role {
@@ -43,7 +49,50 @@ enum DaemonManager {
     /// 1. Check if PID file exists and the process is alive
     /// 2. Try connecting to the socket
     /// 3. If both check out → proxy; otherwise → daemon
+    ///
+    /// This method acquires an exclusive file lock (flock) to prevent a race
+    /// condition where two processes starting simultaneously could both detect
+    /// no existing daemon and both attempt to become the daemon.
     static func detectRole() -> Role {
+        // Ensure the directory exists
+        let dir = (lockFilePath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(
+            atPath: dir,
+            withIntermediateDirectories: true
+        )
+
+        // Open (or create) the lock file
+        let lockFd = open(lockFilePath, O_CREAT | O_RDWR, 0o644)
+        guard lockFd >= 0 else {
+            // If we can't open the lock file, fall back to the old behavior
+            return detectRoleUnlocked()
+        }
+
+        // Acquire an exclusive lock — this blocks until the lock is available
+        guard flock(lockFd, LOCK_EX) == 0 else {
+            close(lockFd)
+            return detectRoleUnlocked()
+        }
+
+        let role = detectRoleUnlocked()
+
+        if role == .daemon {
+            // Write PID file while still holding the lock so that another
+            // process starting concurrently will see our PID before it can
+            // finish its own detectRole().
+            let pid = ProcessInfo.processInfo.processIdentifier
+            try? "\(pid)".write(toFile: pidFilePath, atomically: true, encoding: .utf8)
+        }
+
+        // Release the lock
+        flock(lockFd, LOCK_UN)
+        close(lockFd)
+
+        return role
+    }
+
+    /// Internal role detection logic without locking.
+    private static func detectRoleUnlocked() -> Role {
         // Check PID file
         if let pidString = try? String(contentsOfFile: pidFilePath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
            let pid = Int32(pidString),
@@ -93,8 +142,11 @@ enum DaemonManager {
 
     /// Write PID file and create the listening socket.
     /// Returns the listening file descriptor.
+    ///
+    /// Note: The PID file is already written atomically by `detectRole()` while
+    /// holding the lock file, so we only update it here as a safety measure.
     static func becomeDaemon() throws -> Int32 {
-        // Write PID file
+        // Write PID file (may already exist from detectRole, but re-write to be safe)
         let pid = ProcessInfo.processInfo.processIdentifier
         try "\(pid)".write(toFile: pidFilePath, atomically: true, encoding: .utf8)
 
