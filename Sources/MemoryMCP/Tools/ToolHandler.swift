@@ -59,15 +59,8 @@ struct ToolHandler: Sendable {
 
             switch dupCheck {
             case .similarExists(let existingId, let similarity):
-                // Merge: combine old + new content, let the newer content take priority
-                let existing = try service.getMemory(id: existingId)
-                let mergedContent: String
-                if let existing {
-                    mergedContent = "\(existing.content)\n\(content)"
-                } else {
-                    mergedContent = content
-                }
-                let _ = try service.updateMemory(id: existingId, content: mergedContent)
+                // Replace: use the newer content instead of appending to avoid unbounded growth
+                let _ = try service.updateMemory(id: existingId, content: content)
 
                 // Merge tags if provided
                 if let tags, !tags.isEmpty {
