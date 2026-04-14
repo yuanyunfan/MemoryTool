@@ -113,35 +113,47 @@ public final class EmbeddingService: @unchecked Sendable {
     ///   - isQuery: If true, prefixes with "query: " (for search).
     ///              If false, prefixes with "passage: " (for storage).
     /// - Returns: L2-normalized 384-dim Float array, or nil if model unavailable.
+    ///
+    /// - Important: Prefer `embedAsync()` from async contexts to avoid deadlocks.
+    ///   This sync version dispatches the semaphore wait to a non-cooperative GCD
+    ///   thread to prevent deadlocking Swift concurrency's cooperative thread pool.
     public func embed(_ text: String, isQuery: Bool = true) -> [Float]? {
         guard let modelBundle, isAvailable else { return nil }
 
         let prefix = isQuery ? "query: " : "passage: "
         let prefixedText = prefix + text
 
-        // Use a semaphore to bridge async → sync.
-        // NOTE: This is only safe when called from a non-async context.
-        // Prefer embedAsync() whenever possible.
+        // Dispatch to a dedicated GCD thread so the semaphore.wait() never blocks
+        // a Swift concurrency cooperative thread. The inner Task may need a
+        // cooperative thread to run; if we blocked one with semaphore.wait(),
+        // that could cause a deadlock under load.
         nonisolated(unsafe) var result: [Float]?
-        let semaphore = DispatchSemaphore(value: 0)
+        let outerSemaphore = DispatchSemaphore(value: 0)
 
-        Task { @Sendable in
-            do {
-                let encoded = try modelBundle.encode(prefixedText)
-                let shaped = await encoded.cast(to: Float.self).shapedArray(of: Float.self)
-                let vector = Array(shaped.scalars)
-                if vector.count == Self.dimension {
-                    result = self.l2Normalize(vector)
-                } else {
-                    logToStderr("EmbeddingService: Unexpected dimension \(vector.count), expected \(Self.dimension)")
+        DispatchQueue.global().async {
+            let semaphore = DispatchSemaphore(value: 0)
+
+            Task { @Sendable in
+                do {
+                    let encoded = try modelBundle.encode(prefixedText)
+                    let shaped = await encoded.cast(to: Float.self).shapedArray(of: Float.self)
+                    let vector = Array(shaped.scalars)
+                    if vector.count == Self.dimension {
+                        result = self.l2Normalize(vector)
+                    } else {
+                        logToStderr("EmbeddingService: Unexpected dimension \(vector.count), expected \(Self.dimension)")
+                    }
+                } catch {
+                    logToStderr("EmbeddingService: Embedding failed: \(error)")
                 }
-            } catch {
-                logToStderr("EmbeddingService: Embedding failed: \(error)")
+                semaphore.signal()
             }
-            semaphore.signal()
+
+            semaphore.wait()
+            outerSemaphore.signal()
         }
 
-        semaphore.wait()
+        outerSemaphore.wait()
         return result
     }
 

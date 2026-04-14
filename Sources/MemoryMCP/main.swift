@@ -81,7 +81,7 @@ do {
         let service = MemoryService(database: database, embeddingService: embeddingService)
 
         // Backfill embeddings for existing memories (triggers model load if needed)
-        let backfilled = try service.backfillEmbeddings()
+        let backfilled = try await service.backfillEmbeddingsAsync()
         if backfilled > 0 {
             logToStderr("Backfilled embeddings for \(backfilled) memories")
         }
@@ -104,7 +104,7 @@ do {
 
         // Register tools/call handler
         await server.withMethodHandler(CallTool.self) { params in
-            try handler.handle(params)
+            try await handler.handle(params)
         }
 
         // Start the MCP server on stdio transport (for this process's own Claude session)
