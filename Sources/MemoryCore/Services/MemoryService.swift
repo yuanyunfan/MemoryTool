@@ -48,6 +48,30 @@ public final class MemoryService: Sendable {
         return .noDuplicate
     }
 
+    /// Check if content is semantically similar to existing memories (async version).
+    ///
+    /// Uses cosine similarity > 0.85 threshold to detect paraphrases.
+    /// Prefer this over the sync version when calling from async contexts.
+    public func checkDuplicateAsync(content: String) async throws -> DeduplicationResult {
+        guard let embeddingService else { return .noDuplicate }
+        guard let queryVec = await embeddingService.embedAsync(content, isQuery: false) else {
+            return .noDuplicate
+        }
+
+        let candidates = try loadEmbeddings()
+        let results = EmbeddingService.search(
+            query: queryVec,
+            candidates: candidates,
+            topK: 1,
+            threshold: 0.85
+        )
+        if let top = results.first {
+            return .similarExists(existingId: top.id, similarity: top.similarity)
+        }
+
+        return .noDuplicate
+    }
+
     // MARK: - CRUD
 
     /// Creates a new memory with semantic deduplication.
@@ -88,6 +112,51 @@ public final class MemoryService: Sendable {
         return memory
     }
 
+    /// Creates a new memory with semantic deduplication (async version).
+    ///
+    /// Prefer this over the sync version when calling from async contexts.
+    @discardableResult
+    public func createMemoryAsync(
+        content: String,
+        category: String = "general",
+        source: String? = nil,
+        tags: [String]? = nil,
+        metadata: String? = nil
+    ) async throws -> Memory {
+        // Generate embedding using async API
+        let embeddingData: Data?
+        if let embeddingService {
+            if let vector = await embeddingService.embedAsync(content, isQuery: false) {
+                embeddingData = EmbeddingService.encodeEmbedding(vector)
+            } else {
+                embeddingData = nil
+            }
+        } else {
+            embeddingData = nil
+        }
+
+        let memory = Memory(
+            content: content,
+            category: category,
+            source: source,
+            metadata: metadata,
+            contentHash: Self.generateContentHash(content),
+            accessCount: 0,
+            lastAccessedAt: nil,
+            embedding: embeddingData
+        )
+
+        try await db.writer().write { dbConn in
+            try memory.insert(dbConn)
+
+            if let tags, !tags.isEmpty {
+                try self.insertTags(tags, for: memory.id, in: dbConn)
+            }
+        }
+
+        return memory
+    }
+
     /// Fetches a single memory by ID.
     public func getMemory(id: String) throws -> Memory? {
         try db.reader().read { dbConn in
@@ -115,6 +184,50 @@ public final class MemoryService: Sendable {
                 // Regenerate embedding for updated content
                 memory.embedding = embeddingService?.embed(content, isQuery: false)
                     .map { EmbeddingService.encodeEmbedding($0) }
+            }
+            if let category { memory.category = category }
+            if let source { memory.source = source }
+            if let metadata { memory.metadata = metadata }
+            memory.updatedAt = Date()
+
+            try memory.update(dbConn)
+            return memory
+        }
+        return result
+    }
+
+    /// Updates an existing memory (async version). Returns the updated memory, or nil if not found.
+    ///
+    /// Prefer this over the sync version when calling from async contexts.
+    @discardableResult
+    public func updateMemoryAsync(
+        id: String,
+        content: String? = nil,
+        category: String? = nil,
+        source: String? = nil,
+        metadata: String? = nil
+    ) async throws -> Memory? {
+        // Pre-compute embedding outside the database write transaction
+        let newEmbeddingData: Data?
+        if let content, let embeddingService {
+            if let vector = await embeddingService.embedAsync(content, isQuery: false) {
+                newEmbeddingData = EmbeddingService.encodeEmbedding(vector)
+            } else {
+                newEmbeddingData = nil
+            }
+        } else {
+            newEmbeddingData = nil
+        }
+
+        let result: Memory? = try await db.writer().write { dbConn -> Memory? in
+            guard var memory = try Memory.fetchOne(dbConn, key: id) else {
+                return nil
+            }
+
+            if let content {
+                memory.content = content
+                memory.contentHash = Self.generateContentHash(content)
+                memory.embedding = newEmbeddingData
             }
             if let category { memory.category = category }
             if let source { memory.source = source }
@@ -231,88 +344,60 @@ public final class MemoryService: Sendable {
             }
         }
 
-        // Phase 3: Merge and rank
-        let allIds = Set(keywordResults.map(\.memory.id))
-            .union(Set(semanticScores.keys))
+        return try rankAndMerge(
+            keywordResults: keywordResults,
+            semanticScores: semanticScores,
+            effectiveLimit: effectiveLimit
+        )
+    }
 
-        // Load full memories for semantic-only results
-        var memoriesById: [String: Memory] = [:]
-        for kr in keywordResults {
-            memoriesById[kr.memory.id] = kr.memory
-        }
-        for id in semanticScores.keys where memoriesById[id] == nil {
-            if let memory = try getMemory(id: id) {
-                memoriesById[id] = memory
-            }
+    /// Hybrid search (async version).
+    ///
+    /// Prefer this over the sync version when calling from async contexts.
+    public func searchMemoriesAsync(
+        query: String,
+        category: String? = nil,
+        tags: [String]? = nil,
+        limit: Int = 20
+    ) async throws -> [Memory] {
+        let effectiveLimit = min(max(limit, 1), 100)
+        let terms = extractSearchTerms(query)
+
+        // If no query, fall back to listing
+        guard !terms.isEmpty || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return try listMemories(category: category, limit: effectiveLimit, offset: 0)
         }
 
-        // Build keyword score map (normalize FTS5 rank to [0, 1])
-        var keywordScores: [String: Float] = [:]
-        if !keywordResults.isEmpty {
-            let minRank = keywordResults.map(\.rank).min() ?? 0
-            let maxRank = keywordResults.map(\.rank).max() ?? 0
-            let range = maxRank - minRank
-            for kr in keywordResults {
-                // FTS5 rank is negative (more negative = better match)
-                // Normalize so best match = 1.0
-                if range > 0 {
-                    keywordScores[kr.memory.id] = Float(1.0 - (kr.rank - minRank) / range)
-                } else {
-                    keywordScores[kr.memory.id] = 1.0
+        // Phase 1: Keyword search (FTS5 + LIKE)
+        let keywordResults = try keywordSearch(
+            terms: terms,
+            category: category,
+            tags: tags,
+            limit: effectiveLimit * 3
+        )
+
+        // Phase 2: Semantic search (if embedding available)
+        var semanticScores: [String: Float] = [:]
+        if let embeddingService {
+            if let queryVec = await embeddingService.embedAsync(query) {
+                let candidates = try loadEmbeddings(category: category, tags: tags)
+                let semanticResults = EmbeddingService.search(
+                    query: queryVec,
+                    candidates: candidates,
+                    topK: effectiveLimit * 3,
+                    threshold: 0.3
+                )
+                for result in semanticResults {
+                    semanticScores[result.id] = result.similarity
                 }
             }
         }
 
-        // Compute max access count for frequency normalization
-        let maxAccessCount = memoriesById.values.map(\.accessCount).max() ?? 1
-
-        // Score and rank all candidates
-        var scored: [(memory: Memory, score: Float)] = []
-        for id in allIds {
-            guard let memory = memoriesById[id] else { continue }
-
-            let kScore = keywordScores[id] ?? 0.0
-            let sScore = semanticScores[id] ?? 0.0
-
-            // Recency score: exponential decay, half-life = 30 days
-            let ageInDays = Float(-memory.createdAt.timeIntervalSinceNow / 86400.0)
-            let recencyScore = exp(-0.693 * ageInDays / 30.0) // ln(2)/30 ≈ 0.0231
-
-            // Frequency score: log-normalized access count
-            let freqScore: Float
-            if maxAccessCount > 0 {
-                freqScore = log(1.0 + Float(memory.accessCount)) / log(1.0 + Float(maxAccessCount))
-            } else {
-                freqScore = 0.0
-            }
-
-            // Weighted combination
-            let hasKeyword = kScore > 0
-            let hasSemantic = sScore > 0
-
-            let finalScore: Float
-            if hasKeyword && hasSemantic {
-                // Both signals available — balanced weights
-                finalScore = 0.35 * kScore + 0.35 * sScore + 0.15 * recencyScore + 0.15 * freqScore
-            } else if hasKeyword {
-                // Keyword only — give it more weight
-                finalScore = 0.55 * kScore + 0.25 * recencyScore + 0.20 * freqScore
-            } else {
-                // Semantic only
-                finalScore = 0.55 * sScore + 0.25 * recencyScore + 0.20 * freqScore
-            }
-
-            scored.append((memory: memory, score: finalScore))
-        }
-
-        scored.sort { $0.score > $1.score }
-
-        let results = Array(scored.prefix(effectiveLimit).map(\.memory))
-
-        // Record access for returned results
-        try? recordAccess(ids: results.map(\.id))
-
-        return results
+        return try rankAndMerge(
+            keywordResults: keywordResults,
+            semanticScores: semanticScores,
+            effectiveLimit: effectiveLimit
+        )
     }
 
     /// Lists memories with optional category filter and pagination.
@@ -487,6 +572,90 @@ public final class MemoryService: Sendable {
         }
     }
 
+    /// Merge keyword and semantic results, score, rank, and return top results.
+    private func rankAndMerge(
+        keywordResults: [KeywordResult],
+        semanticScores: [String: Float],
+        effectiveLimit: Int
+    ) throws -> [Memory] {
+        let allIds = Set(keywordResults.map(\.memory.id))
+            .union(Set(semanticScores.keys))
+
+        // Load full memories for semantic-only results
+        var memoriesById: [String: Memory] = [:]
+        for kr in keywordResults {
+            memoriesById[kr.memory.id] = kr.memory
+        }
+        for id in semanticScores.keys where memoriesById[id] == nil {
+            if let memory = try getMemory(id: id) {
+                memoriesById[id] = memory
+            }
+        }
+
+        // Build keyword score map (normalize FTS5 rank to [0, 1])
+        var keywordScores: [String: Float] = [:]
+        if !keywordResults.isEmpty {
+            let minRank = keywordResults.map(\.rank).min() ?? 0
+            let maxRank = keywordResults.map(\.rank).max() ?? 0
+            let range = maxRank - minRank
+            for kr in keywordResults {
+                if range > 0 {
+                    keywordScores[kr.memory.id] = Float(1.0 - (kr.rank - minRank) / range)
+                } else {
+                    keywordScores[kr.memory.id] = 1.0
+                }
+            }
+        }
+
+        // Compute max access count for frequency normalization
+        let maxAccessCount = memoriesById.values.map(\.accessCount).max() ?? 1
+
+        // Score and rank all candidates
+        var scored: [(memory: Memory, score: Float)] = []
+        for id in allIds {
+            guard let memory = memoriesById[id] else { continue }
+
+            let kScore = keywordScores[id] ?? 0.0
+            let sScore = semanticScores[id] ?? 0.0
+
+            // Recency score: exponential decay, half-life = 30 days
+            let ageInDays = Float(-memory.createdAt.timeIntervalSinceNow / 86400.0)
+            let recencyScore = exp(-0.693 * ageInDays / 30.0)
+
+            // Frequency score: log-normalized access count
+            let freqScore: Float
+            if maxAccessCount > 0 {
+                freqScore = log(1.0 + Float(memory.accessCount)) / log(1.0 + Float(maxAccessCount))
+            } else {
+                freqScore = 0.0
+            }
+
+            // Weighted combination
+            let hasKeyword = kScore > 0
+            let hasSemantic = sScore > 0
+
+            let finalScore: Float
+            if hasKeyword && hasSemantic {
+                finalScore = 0.35 * kScore + 0.35 * sScore + 0.15 * recencyScore + 0.15 * freqScore
+            } else if hasKeyword {
+                finalScore = 0.55 * kScore + 0.25 * recencyScore + 0.20 * freqScore
+            } else {
+                finalScore = 0.55 * sScore + 0.25 * recencyScore + 0.20 * freqScore
+            }
+
+            scored.append((memory: memory, score: finalScore))
+        }
+
+        scored.sort { $0.score > $1.score }
+
+        let results = Array(scored.prefix(effectiveLimit).map(\.memory))
+
+        // Record access for returned results
+        try? recordAccess(ids: results.map(\.id))
+
+        return results
+    }
+
     // MARK: - Tags
 
     /// Adds tags to a memory. Creates tags that don't exist yet.
@@ -601,6 +770,32 @@ public final class MemoryService: Sendable {
             if let vector = embeddingService.embed(memory.content, isQuery: false) {
                 let data = EmbeddingService.encodeEmbedding(vector)
                 try db.writer().write { dbConn in
+                    try dbConn.execute(
+                        sql: "UPDATE memory SET embedding = ? WHERE id = ?",
+                        arguments: [data, memory.id]
+                    )
+                }
+                count += 1
+            }
+        }
+        return count
+    }
+
+    /// Generate and store embeddings for all memories that don't have one yet (async version).
+    ///
+    /// Prefer this over the sync version when calling from async contexts.
+    public func backfillEmbeddingsAsync() async throws -> Int {
+        guard let embeddingService else { return 0 }
+
+        let memories = try await db.reader().read { dbConn in
+            try Memory.filter(Column("embedding") == nil).fetchAll(dbConn)
+        }
+
+        var count = 0
+        for memory in memories {
+            if let vector = await embeddingService.embedAsync(memory.content, isQuery: false) {
+                let data = EmbeddingService.encodeEmbedding(vector)
+                try await db.writer().write { dbConn in
                     try dbConn.execute(
                         sql: "UPDATE memory SET embedding = ? WHERE id = ?",
                         arguments: [data, memory.id]

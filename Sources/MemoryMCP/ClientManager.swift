@@ -146,7 +146,7 @@ final class ClientManager: @unchecked Sendable {
         }
 
         await clientServer.withMethodHandler(CallTool.self) { params in
-            try handler.handle(params)
+            try await handler.handle(params)
         }
 
         // Use UDS transport with the client file descriptor

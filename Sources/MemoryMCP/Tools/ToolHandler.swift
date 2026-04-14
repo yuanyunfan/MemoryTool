@@ -14,16 +14,16 @@ struct ToolHandler: Sendable {
     }
 
     /// Route a tool call to the appropriate handler.
-    func handle(_ params: CallTool.Parameters) throws -> CallTool.Result {
+    func handle(_ params: CallTool.Parameters) async throws -> CallTool.Result {
         switch params.name {
         case "remember":
-            return try handleRemember(params.arguments)
+            return try await handleRemember(params.arguments)
         case "recall":
-            return try handleRecall(params.arguments)
+            return try await handleRecall(params.arguments)
         case "forget":
             return try handleForget(params.arguments)
         case "update_memory":
-            return try handleUpdateMemory(params.arguments)
+            return try await handleUpdateMemory(params.arguments)
         case "list_categories":
             return try handleListCategories()
         case "get_memory":
@@ -38,7 +38,7 @@ struct ToolHandler: Sendable {
 
     // MARK: - remember
 
-    private func handleRemember(_ arguments: [String: Value]?) throws -> CallTool.Result {
+    private func handleRemember(_ arguments: [String: Value]?) async throws -> CallTool.Result {
         guard let content = arguments?["content"]?.stringValue, !content.isEmpty else {
             return errorResult("Parameter 'content' is required and must not be empty.")
         }
@@ -55,12 +55,12 @@ struct ToolHandler: Sendable {
 
         do {
             // Deduplication check
-            let dupCheck = try service.checkDuplicate(content: content)
+            let dupCheck = try await service.checkDuplicateAsync(content: content)
 
             switch dupCheck {
             case .similarExists(let existingId, let similarity):
                 // Replace: use the newer content instead of appending to avoid unbounded growth
-                let _ = try service.updateMemory(id: existingId, content: content)
+                let _ = try await service.updateMemoryAsync(id: existingId, content: content)
 
                 // Merge tags if provided
                 if let tags, !tags.isEmpty {
@@ -76,7 +76,7 @@ struct ToolHandler: Sendable {
                 return textResult(toJSON(response))
 
             case .noDuplicate:
-                let memory = try service.createMemory(
+                let memory = try await service.createMemoryAsync(
                     content: content,
                     category: category,
                     source: source,
@@ -97,7 +97,7 @@ struct ToolHandler: Sendable {
 
     // MARK: - recall
 
-    private func handleRecall(_ arguments: [String: Value]?) throws -> CallTool.Result {
+    private func handleRecall(_ arguments: [String: Value]?) async throws -> CallTool.Result {
         // Accept both "query" and "content" as parameter name (Claude sometimes confuses them)
         let query = arguments?["query"]?.stringValue
             ?? arguments?["content"]?.stringValue
@@ -109,7 +109,7 @@ struct ToolHandler: Sendable {
         limit = min(max(limit, 1), 50)
 
         do {
-            let memories = try service.searchMemories(
+            let memories = try await service.searchMemoriesAsync(
                 query: query,
                 category: category,
                 tags: tags,
@@ -161,7 +161,7 @@ struct ToolHandler: Sendable {
 
     // MARK: - update_memory
 
-    private func handleUpdateMemory(_ arguments: [String: Value]?) throws -> CallTool.Result {
+    private func handleUpdateMemory(_ arguments: [String: Value]?) async throws -> CallTool.Result {
         guard let memoryId = arguments?["memory_id"]?.stringValue, !memoryId.isEmpty else {
             return errorResult("Parameter 'memory_id' is required.")
         }
@@ -177,7 +177,7 @@ struct ToolHandler: Sendable {
         }
 
         do {
-            guard let updated = try service.updateMemory(
+            guard let updated = try await service.updateMemoryAsync(
                 id: memoryId,
                 content: content,
                 category: category,
