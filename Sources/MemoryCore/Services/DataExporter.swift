@@ -142,7 +142,8 @@ public struct DataExporter: Sendable {
                     source: source,
                     createdAt: createdAt,
                     updatedAt: updatedAt,
-                    metadata: metadata
+                    metadata: metadata,
+                    contentHash: MemoryService.generateContentHash(content)
                 )
 
                 try insertMemoryDirectly(memory, tags: tags, service: service)

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import GRDB
 
@@ -70,6 +71,7 @@ public final class MemoryService: Sendable {
             category: category,
             source: source,
             metadata: metadata,
+            contentHash: Self.generateContentHash(content),
             accessCount: 0,
             lastAccessedAt: nil,
             embedding: embeddingData
@@ -109,6 +111,7 @@ public final class MemoryService: Sendable {
 
             if let content {
                 memory.content = content
+                memory.contentHash = Self.generateContentHash(content)
                 // Regenerate embedding for updated content
                 memory.embedding = embeddingService?.embed(content, isQuery: false)
                     .map { EmbeddingService.encodeEmbedding($0) }
@@ -586,6 +589,16 @@ public final class MemoryService: Sendable {
     }
 
     // MARK: - Private Helpers
+
+    /// Generates a SHA256 content hash from the given content string.
+    ///
+    /// Normalizes the content (trim whitespace + lowercase) before hashing,
+    /// matching the approach used by the v3 migration backfill.
+    static func generateContentHash(_ content: String) -> String {
+        let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let hash = SHA256.hash(data: Data(normalized.utf8))
+        return hash.map { String(format: "%02x", $0) }.joined()
+    }
 
     /// Insert tags and create join records. Must be called inside a write transaction.
     private func insertTags(_ tags: [String], for memoryId: String, in dbConn: Database) throws {
