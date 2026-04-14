@@ -66,8 +66,7 @@ struct MemoryToolApp: App {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         do {
-            let memories = try memoryService.listMemories(limit: 100, offset: 0)
-            let data = try JSONEncoder().encode(memories)
+            let data = try DataExporter.exportToJSON(service: memoryService)
             try data.write(to: url)
         } catch {
             let alert = NSAlert()
