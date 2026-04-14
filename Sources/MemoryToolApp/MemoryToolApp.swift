@@ -4,6 +4,7 @@ import MemoryCore
 @main
 struct MemoryToolApp: App {
     @AppStorage("appearanceMode") private var appearanceMode: String = AppearanceMode.system.rawValue
+    @State private var viewModel: MemoryViewModel
     private let memoryService: MemoryService
 
     private var colorScheme: ColorScheme? {
@@ -26,6 +27,7 @@ struct MemoryToolApp: App {
             let database = try AppDatabase.create(path: dbPath)
             // GUI doesn't need embedding service (MCP handles it)
             self.memoryService = MemoryService(database: database)
+            self._viewModel = State(initialValue: MemoryViewModel(service: self.memoryService))
         } catch {
             fatalError("Failed to initialize database at \(dbPath): \(error)")
         }
@@ -33,7 +35,7 @@ struct MemoryToolApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(viewModel: MemoryViewModel(service: memoryService))
+            ContentView(viewModel: viewModel)
                 .preferredColorScheme(colorScheme)
         }
         .defaultSize(width: 1000, height: 700)
