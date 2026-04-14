@@ -370,8 +370,22 @@ public final class MemoryService: Sendable {
             }
 
             for term in likeTerms {
+                // Compute a synthetic negative rank for LIKE results to approximate
+                // FTS5 ranking behavior. Uses occurrence frequency (via LENGTH trick)
+                // and early-position bonus so that LIKE-only queries (common with
+                // short CJK terms like '猫') still produce meaningful ranking.
+                //
+                // Formula: -(occurrences * 10.0 + position_bonus)
+                //   occurrences = (LENGTH(content) - LENGTH(REPLACE(content, term, ''))) / LENGTH(term)
+                //   position_bonus = 5.0 * (1.0 - CAST(MIN(INSTR(content, term), LENGTH(content)) AS REAL) / MAX(LENGTH(content), 1))
+                //
+                // The result is negative (like FTS5 rank), with more negative = better match.
                 unionParts.append("""
-                    SELECT memory.*, 0.0 AS search_rank
+                    SELECT memory.*,
+                        -(
+                            CAST((LENGTH(content) - LENGTH(REPLACE(content, ?, ''))) AS REAL) / MAX(LENGTH(?), 1) * 10.0
+                            + 5.0 * (1.0 - CAST(MIN(INSTR(content, ?), LENGTH(content)) AS REAL) / MAX(LENGTH(content), 1))
+                        ) AS search_rank
                     FROM memory
                     WHERE memory.content LIKE ? ESCAPE '\\'
                     """)
@@ -379,6 +393,10 @@ public final class MemoryService: Sendable {
                     .replacingOccurrences(of: "\\", with: "\\\\")
                     .replacingOccurrences(of: "%", with: "\\%")
                     .replacingOccurrences(of: "_", with: "\\_")
+                // Arguments: raw term for REPLACE, raw term for LENGTH, raw term for INSTR, escaped for LIKE
+                arguments.append(term)
+                arguments.append(term)
+                arguments.append(term)
                 arguments.append("%\(escapedTerm)%")
             }
 
