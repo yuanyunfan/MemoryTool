@@ -520,6 +520,12 @@ public final class MemoryService: Sendable {
                     """,
                 arguments: StatementArguments(arguments)
             )
+
+            // Clean up orphaned tags (tags with no remaining memory associations)
+            try dbConn.execute(sql: """
+                DELETE FROM tag
+                WHERE id NOT IN (SELECT DISTINCT tag_id FROM memory_tag)
+                """)
         }
     }
 
