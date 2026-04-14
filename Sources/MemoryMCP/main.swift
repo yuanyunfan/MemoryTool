@@ -152,24 +152,13 @@ do {
         // Run UDS accept loop in background
         clientManager.startAcceptLoop(listenFd: listenFd)
 
-        // Monitor stdin — when it closes, the owning Claude session ended.
-        // But as a daemon, we keep running to serve other proxy clients.
-        // Only exit when there are no more connections AND stdin is closed.
+        // Monitor stdin closure through the StdioTransport's read loop.
+        // When stdin closes, the transport's message stream ends and
+        // server.waitUntilCompleted() returns. We avoid reading stdin
+        // directly here to prevent competing with StdioTransport for data.
         Task {
-            // Wait for stdin EOF
-            let stdinFd = FileHandle.standardInput.fileDescriptor
-            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
-            defer { buffer.deallocate() }
-
-            while true {
-                let bytesRead = read(stdinFd, buffer, 1)
-                if bytesRead <= 0 {
-                    logToStderr("Daemon's own stdin closed. Will continue serving proxy clients.")
-                    break
-                }
-                // Discard any data read from stdin after MCP transport handles it.
-                // In practice StdioTransport consumes stdin, so this is just a safety net.
-            }
+            await server.waitUntilCompleted()
+            logToStderr("Daemon's own stdin closed. Will continue serving proxy clients.")
         }
 
         // Keep the process alive. The daemon exits when:
