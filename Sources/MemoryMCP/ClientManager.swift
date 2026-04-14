@@ -22,8 +22,58 @@ final class ClientManager: @unchecked Sendable {
     private let handler: ToolHandler
     private let clientCountMutex = ClientMutex()
 
+    /// Tracks active client tasks for graceful shutdown.
+    private let activeClientsMutex = ActiveClientsMutex()
+
+    /// The accept loop task, stored so it can be cancelled during shutdown.
+    private var acceptTask: Task<Void, Never>?
+
     init(handler: ToolHandler) {
         self.handler = handler
+    }
+
+    /// Gracefully shut down: stop accepting new connections and wait for
+    /// in-flight client requests to complete (with a timeout).
+    ///
+    /// - Parameter timeout: Maximum time to wait for in-flight requests, in seconds.
+    func gracefulShutdown(timeout: Duration = .seconds(5)) async {
+        logToStderr("ClientManager: initiating graceful shutdown...")
+
+        // Cancel the accept loop so no new connections are accepted
+        acceptTask?.cancel()
+
+        // Wait for active client tasks to finish, with a timeout
+        let activeTasks = activeClientsMutex.getAll()
+        if !activeTasks.isEmpty {
+            logToStderr("ClientManager: waiting for \(activeTasks.count) active client(s) to finish...")
+
+            // Race: wait for all tasks vs. timeout
+            await withTaskGroup(of: Void.self) { group in
+                // Task that waits for all active clients
+                group.addTask {
+                    for task in activeTasks {
+                        await task.value
+                    }
+                }
+
+                // Task that enforces the timeout
+                group.addTask {
+                    try? await Task.sleep(for: timeout)
+                }
+
+                // Return as soon as whichever finishes first
+                await group.next()
+                group.cancelAll()
+            }
+
+            // Cancel any remaining tasks that didn't finish in time
+            let remaining = activeClientsMutex.getAll()
+            for task in remaining {
+                task.cancel()
+            }
+
+            logToStderr("ClientManager: graceful shutdown complete.")
+        }
     }
 
     /// Accept connections on the listening socket in a loop.
@@ -49,12 +99,17 @@ final class ClientManager: @unchecked Sendable {
                 let count = clientCountMutex.increment()
                 logToStderr("Daemon: proxy client connected (total: \(count))")
 
-                Task { [handler] in
+                let taskID = UUID()
+                let clientTask = Task { [handler, weak self] in
                     await Self.handleProxyClient(clientFd: clientFd, handler: handler)
 
-                    let remaining = self.clientCountMutex.decrement()
-                    logToStderr("Daemon: proxy client disconnected (remaining: \(remaining))")
+                    if let self {
+                        self.activeClientsMutex.remove(id: taskID)
+                        let remaining = self.clientCountMutex.decrement()
+                        logToStderr("Daemon: proxy client disconnected (remaining: \(remaining))")
+                    }
                 }
+                activeClientsMutex.add(id: taskID, task: clientTask)
             } else {
                 if errno == EAGAIN || errno == EWOULDBLOCK {
                     try? await Task.sleep(for: .milliseconds(50))
@@ -66,6 +121,13 @@ final class ClientManager: @unchecked Sendable {
         }
 
         close(listenFd)
+    }
+
+    /// Start the accept loop in a background task.
+    func startAcceptLoop(listenFd: Int32) {
+        acceptTask = Task {
+            await acceptLoop(listenFd: listenFd)
+        }
     }
 
     /// Handle a single proxy client connection.
@@ -271,6 +333,32 @@ private final class ClientMutex: @unchecked Sendable {
         os_unfair_lock_lock(&_lock)
         count -= 1
         let result = count
+        os_unfair_lock_unlock(&_lock)
+        return result
+    }
+}
+
+// MARK: - Thread-safe active client task tracker
+
+private final class ActiveClientsMutex: @unchecked Sendable {
+    private var tasks: [UUID: Task<Void, Never>] = [:]
+    private var _lock = os_unfair_lock()
+
+    func add(id: UUID, task: Task<Void, Never>) {
+        os_unfair_lock_lock(&_lock)
+        tasks[id] = task
+        os_unfair_lock_unlock(&_lock)
+    }
+
+    func remove(id: UUID) {
+        os_unfair_lock_lock(&_lock)
+        tasks.removeValue(forKey: id)
+        os_unfair_lock_unlock(&_lock)
+    }
+
+    func getAll() -> [Task<Void, Never>] {
+        os_unfair_lock_lock(&_lock)
+        let result = Array(tasks.values)
         os_unfair_lock_unlock(&_lock)
         return result
     }

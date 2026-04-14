@@ -118,14 +118,29 @@ do {
 
         let clientManager = ClientManager(handler: handler)
 
-        // Register cleanup handler
+        // Register cleanup handler with graceful shutdown
         let signalSources = [SIGTERM, SIGINT].map { sig -> DispatchSourceSignal in
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler {
-                logToStderr("Received signal \(sig), cleaning up...")
-                DaemonManager.cleanupDaemon()
-                close(listenFd)
-                exit(0)
+                logToStderr("Received signal \(sig), initiating graceful shutdown...")
+
+                Task {
+                    // 1. Stop accepting new connections
+                    // (gracefulShutdown cancels the accept loop internally)
+
+                    // 2. Stop the stdio MCP server — finishes in-flight request processing
+                    await server.stop()
+
+                    // 3. Wait for in-flight proxy client requests to complete (with timeout)
+                    await clientManager.gracefulShutdown(timeout: .seconds(5))
+
+                    // 4. Clean up daemon files and close the listen socket
+                    DaemonManager.cleanupDaemon()
+                    close(listenFd)
+
+                    logToStderr("Graceful shutdown complete, exiting.")
+                    exit(0)
+                }
             }
             signal(sig, SIG_IGN) // Ignore default handler
             source.resume()
@@ -135,9 +150,7 @@ do {
         _ = signalSources
 
         // Run UDS accept loop in background
-        Task {
-            await clientManager.acceptLoop(listenFd: listenFd)
-        }
+        clientManager.startAcceptLoop(listenFd: listenFd)
 
         // Monitor stdin — when it closes, the owning Claude session ended.
         // But as a daemon, we keep running to serve other proxy clients.
