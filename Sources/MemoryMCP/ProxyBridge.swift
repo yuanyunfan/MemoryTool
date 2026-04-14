@@ -1,5 +1,11 @@
 import Foundation
 
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+
 /// A thin proxy that bridges stdio ↔ Unix Domain Socket.
 ///
 /// When a MemoryMCP instance detects an existing daemon, it runs as a proxy:
@@ -19,7 +25,7 @@ enum ProxyBridge {
         let stdinFd = FileHandle.standardInput.fileDescriptor
         let stdoutFd = FileHandle.standardOutput.fileDescriptor
 
-        // Set both fds to non-blocking
+        // Set both fds to non-blocking so reads don't block after poll() wakeup
         setNonBlocking(stdinFd)
         setNonBlocking(daemonFd)
 
@@ -27,8 +33,33 @@ enum ProxyBridge {
         var stdinClosed = false
 
         while !Task.isCancelled {
-            // Poll stdin → daemon
+            // Use poll() to wait for data on either fd, avoiding busy-spin.
+            // Timeout of 100ms allows periodic checks of Task.isCancelled.
+            var fds: [pollfd] = []
             if !stdinClosed {
+                fds.append(pollfd(fd: stdinFd, events: Int16(POLLIN), revents: 0))
+            }
+            fds.append(pollfd(fd: daemonFd, events: Int16(POLLIN), revents: 0))
+
+            let pollResult = poll(&fds, nfds_t(fds.count), 100 /* ms */)
+            if pollResult < 0 {
+                if errno == EINTR { continue }
+                logToStderr("Proxy: poll error: \(String(cString: strerror(errno)))")
+                break
+            }
+
+            // Resolve which pollfd corresponds to which fd
+            var stdinRevents: Int16 = 0
+            var daemonRevents: Int16 = 0
+            if !stdinClosed {
+                stdinRevents = fds[0].revents
+                daemonRevents = fds[1].revents
+            } else {
+                daemonRevents = fds[0].revents
+            }
+
+            // Read stdin → daemon
+            if !stdinClosed && (stdinRevents & Int16(POLLIN | POLLHUP | POLLERR)) != 0 {
                 let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
                 defer { buffer.deallocate() }
 
@@ -51,8 +82,8 @@ enum ProxyBridge {
                 }
             }
 
-            // Poll daemon → stdout
-            do {
+            // Read daemon → stdout
+            if (daemonRevents & Int16(POLLIN | POLLHUP | POLLERR)) != 0 {
                 let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
                 defer { buffer.deallocate() }
 
@@ -71,32 +102,6 @@ enum ProxyBridge {
                     break
                 }
             }
-
-            // If stdin is closed and nothing to read from daemon, we're done
-            if stdinClosed {
-                // Give daemon a moment to flush its response
-                try? await Task.sleep(for: .milliseconds(10))
-
-                // Check if daemon has more data
-                let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
-                defer { buffer.deallocate() }
-                let peek = read(daemonFd, buffer, 1)
-                if peek == 0 {
-                    break // Daemon finished sending
-                } else if peek > 0 {
-                    // There was data — write it and continue
-                    _ = write(stdoutFd, buffer, 1)
-                    continue
-                } else if errno == EAGAIN || errno == EWOULDBLOCK {
-                    // No data yet, keep waiting briefly
-                    continue
-                } else {
-                    break
-                }
-            }
-
-            // Yield to avoid busy-spinning
-            try? await Task.sleep(for: .milliseconds(1))
         }
 
         close(daemonFd)
