@@ -165,8 +165,23 @@ public final class EmbeddingService: @unchecked Sendable {
     }
 
     /// Decode embedding from SQLite BLOB Data.
+    ///
+    /// Returns an empty array if the data is malformed (length not a multiple of
+    /// `MemoryLayout<Float>.size`, or does not match the expected dimension).
     public static func decodeEmbedding(_ data: Data) -> [Float] {
-        data.withUnsafeBytes { raw in
+        let floatSize = MemoryLayout<Float>.size
+        guard !data.isEmpty,
+              data.count % floatSize == 0 else {
+            logToStderr("EmbeddingService: decodeEmbedding failed — data length \(data.count) is not a multiple of \(floatSize)")
+            return []
+        }
+
+        let floatCount = data.count / floatSize
+        if floatCount != dimension {
+            logToStderr("EmbeddingService: decodeEmbedding warning — decoded \(floatCount) floats, expected \(dimension)")
+        }
+
+        return data.withUnsafeBytes { raw in
             let buffer = raw.bindMemory(to: Float.self)
             return Array(buffer)
         }
