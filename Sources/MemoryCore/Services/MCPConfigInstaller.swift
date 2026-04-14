@@ -127,17 +127,42 @@ public struct MCPConfigInstaller: Sendable {
 
     /// Generates a JSON snippet that users can paste manually.
     public static func generateConfigSnippet(binaryPath: String) -> String {
-        """
+        let escapedPath = jsonEscape(binaryPath)
+        return """
         {
           "mcpServers": {
             "\(serverKey)": {
-              "command": "\(binaryPath)",
+              "command": "\(escapedPath)",
               "args": [],
               "env": {}
             }
           }
         }
         """
+    }
+
+    /// Escapes a string for safe inclusion inside a JSON double-quoted value.
+    ///
+    /// Handles backslashes, double quotes, and control characters (U+0000–U+001F).
+    private static func jsonEscape(_ string: String) -> String {
+        var result = ""
+        result.reserveCapacity(string.count)
+        for char in string {
+            switch char {
+            case "\\": result += "\\\\"
+            case "\"": result += "\\\""
+            case "\n": result += "\\n"
+            case "\r": result += "\\r"
+            case "\t": result += "\\t"
+            default:
+                if let ascii = char.asciiValue, ascii < 0x20 {
+                    result += String(format: "\\u%04x", ascii)
+                } else {
+                    result.append(char)
+                }
+            }
+        }
+        return result
     }
 
     // MARK: - Private Helpers
