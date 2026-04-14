@@ -248,13 +248,39 @@ public final class MemoryService: Sendable {
             guard let memory = try Memory.fetchOne(dbConn, key: id) else {
                 return false
             }
+
+            // Collect tag IDs associated with this memory BEFORE deletion,
+            // so we only check these specific tags for orphan status afterwards.
+            // This avoids a broad scan that could remove tags being concurrently
+            // created by another DatabasePool connection on the same file.
+            let tagIds = try Int64.fetchAll(
+                dbConn,
+                sql: "SELECT tag_id FROM memory_tag WHERE memory_id = ?",
+                arguments: [id]
+            )
+
             try memory.delete(dbConn)
 
-            // Clean up orphaned tags (tags with no remaining memory associations)
-            try dbConn.execute(sql: """
-                DELETE FROM tag
-                WHERE id NOT IN (SELECT DISTINCT tag_id FROM memory_tag)
-                """)
+            // Clean up only the specific tags that were associated with the
+            // deleted memory AND are now orphaned (no remaining associations).
+            if !tagIds.isEmpty {
+                let placeholders = tagIds.map { _ in "?" }.joined(separator: ", ")
+                var arguments: [any DatabaseValueConvertible] = []
+                for tagId in tagIds { arguments.append(tagId) }
+                // Append the same tagIds again for the subquery
+                for tagId in tagIds { arguments.append(tagId) }
+                try dbConn.execute(
+                    sql: """
+                        DELETE FROM tag
+                        WHERE id IN (\(placeholders))
+                          AND id NOT IN (
+                            SELECT DISTINCT tag_id FROM memory_tag
+                            WHERE tag_id IN (\(placeholders))
+                          )
+                        """,
+                    arguments: StatementArguments(arguments)
+                )
+            }
 
             return true
         }
@@ -676,8 +702,19 @@ public final class MemoryService: Sendable {
 
         try db.writer().write { dbConn in
             let placeholders = tags.map { _ in "?" }.joined(separator: ", ")
-            var arguments: [any DatabaseValueConvertible] = [memoryId]
-            for tag in tags { arguments.append(tag) }
+
+            // Collect the tag IDs we're about to remove BEFORE deletion,
+            // so we only check these specific tags for orphan status afterwards.
+            var fetchArgs: [any DatabaseValueConvertible] = []
+            for tag in tags { fetchArgs.append(tag) }
+            let affectedTagIds = try Int64.fetchAll(
+                dbConn,
+                sql: "SELECT id FROM tag WHERE name IN (\(placeholders))",
+                arguments: StatementArguments(fetchArgs)
+            )
+
+            var deleteArgs: [any DatabaseValueConvertible] = [memoryId]
+            for tag in tags { deleteArgs.append(tag) }
 
             try dbConn.execute(
                 sql: """
@@ -687,14 +724,30 @@ public final class MemoryService: Sendable {
                         SELECT id FROM tag WHERE name IN (\(placeholders))
                       )
                     """,
-                arguments: StatementArguments(arguments)
+                arguments: StatementArguments(deleteArgs)
             )
 
-            // Clean up orphaned tags (tags with no remaining memory associations)
-            try dbConn.execute(sql: """
-                DELETE FROM tag
-                WHERE id NOT IN (SELECT DISTINCT tag_id FROM memory_tag)
-                """)
+            // Clean up only the specific tags that were just unlinked AND
+            // are now orphaned (no remaining associations). This avoids a
+            // broad scan that could remove tags being concurrently created
+            // by another DatabasePool connection on the same file.
+            if !affectedTagIds.isEmpty {
+                let tagPlaceholders = affectedTagIds.map { _ in "?" }.joined(separator: ", ")
+                var orphanArgs: [any DatabaseValueConvertible] = []
+                for tagId in affectedTagIds { orphanArgs.append(tagId) }
+                for tagId in affectedTagIds { orphanArgs.append(tagId) }
+                try dbConn.execute(
+                    sql: """
+                        DELETE FROM tag
+                        WHERE id IN (\(tagPlaceholders))
+                          AND id NOT IN (
+                            SELECT DISTINCT tag_id FROM memory_tag
+                            WHERE tag_id IN (\(tagPlaceholders))
+                          )
+                        """,
+                    arguments: StatementArguments(orphanArgs)
+                )
+            }
         }
     }
 
