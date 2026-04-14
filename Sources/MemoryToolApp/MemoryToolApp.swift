@@ -85,15 +85,16 @@ struct MemoryToolApp: App {
 
         do {
             let data = try Data(contentsOf: url)
-            let memories = try JSONDecoder().decode([Memory].self, from: data)
-            for memory in memories {
-                try memoryService.createMemory(
-                    content: memory.content,
-                    category: memory.category,
-                    source: memory.source,
-                    metadata: memory.metadata
-                )
+            let result = try DataExporter.importFromJSON(data: data, service: memoryService)
+
+            let alert = NSAlert()
+            alert.messageText = "Import Complete"
+            var info = "Imported: \(result.imported), Skipped (already exist): \(result.skipped)"
+            if !result.errors.isEmpty {
+                info += "\nErrors: \(result.errors.joined(separator: "\n"))"
             }
+            alert.informativeText = info
+            alert.runModal()
         } catch {
             let alert = NSAlert()
             alert.messageText = "Import Failed"
