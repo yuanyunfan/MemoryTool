@@ -370,9 +370,13 @@ public final class MemoryService: Sendable {
                 unionParts.append("""
                     SELECT memory.*, 0.0 AS search_rank
                     FROM memory
-                    WHERE memory.content LIKE ?
+                    WHERE memory.content LIKE ? ESCAPE '\\'
                     """)
-                arguments.append("%\(term)%")
+                let escapedTerm = term
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "%", with: "\\%")
+                    .replacingOccurrences(of: "_", with: "\\_")
+                arguments.append("%\(escapedTerm)%")
             }
 
             let innerSQL = unionParts.joined(separator: " UNION ALL ")
