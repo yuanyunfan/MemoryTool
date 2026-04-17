@@ -85,7 +85,7 @@ enum ToolDefinitions {
             "required": .array([.string("query")]),
         ]),
         annotations: .init(
-            readOnlyHint: true,
+            readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: true,
             openWorldHint: false
