@@ -48,11 +48,10 @@ public final class AppDatabase: Sendable {
     }
 
     /// Legacy path-based init — kept for backward compatibility.
+    @available(*, deprecated, message: "Use AppDatabase.create(path:) instead")
     public init(path: String) throws {
-        var config = Configuration()
-        config.journalMode = .wal
-        self.dbWriter = try DatabasePool(path: path, configuration: config)
-        try migrate()
+        let db = try AppDatabase.create(path: path)
+        self.dbWriter = db.dbWriter
     }
 
     private init(dbWriter: any DatabaseWriter) {
