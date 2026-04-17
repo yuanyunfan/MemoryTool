@@ -168,6 +168,7 @@ struct ToolHandler: Sendable {
 
         let content = arguments?["content"]?.stringValue
         let category = arguments?["category"]?.stringValue
+        let source = arguments?["source"]?.stringValue
         let userMetadata = arguments?["metadata"]?.stringValue
         let tags = extractTags(from: arguments)
 
@@ -181,6 +182,7 @@ struct ToolHandler: Sendable {
                 id: memoryId,
                 content: content,
                 category: category,
+                source: source,
                 metadata: userMetadata
             ) else {
                 return errorResult("Memory not found with ID: \(memoryId)")
