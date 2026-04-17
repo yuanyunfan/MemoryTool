@@ -470,7 +470,7 @@ public final class MemoryService: Sendable {
             var arguments: [any DatabaseValueConvertible] = []
 
             if !ftsTerms.isEmpty {
-                let ftsQuery = ftsTerms.map { "\"\($0)\"" }.joined(separator: " OR ")
+                let ftsQuery = ftsTerms.map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"" }.joined(separator: " OR ")
                 unionParts.append("""
                     SELECT memory.*, memory_fts.rank AS search_rank
                     FROM memory
