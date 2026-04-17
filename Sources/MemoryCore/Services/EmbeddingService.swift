@@ -138,7 +138,11 @@ public final class EmbeddingService: @unchecked Sendable {
     ///   calls to prevent thread starvation deadlock when many callers block GCD
     ///   threads concurrently (see Issue #39).
     public func embed(_ text: String, isQuery: Bool = true) -> [Float]? {
-        guard let modelBundle, isAvailable else { return nil }
+        let bundle = stateMutex.withLock { () -> ModelBundle? in
+            guard let modelBundle, isAvailable else { return nil }
+            return modelBundle
+        }
+        guard let bundle else { return nil }
 
         let prefix = isQuery ? "query: " : "passage: "
         let prefixedText = prefix + text
@@ -157,7 +161,7 @@ public final class EmbeddingService: @unchecked Sendable {
 
             Task { @Sendable in
                 do {
-                    let encoded = try modelBundle.encode(prefixedText)
+                    let encoded = try bundle.encode(prefixedText)
                     let shaped = await encoded.cast(to: Float.self).shapedArray(of: Float.self)
                     let vector = Array(shaped.scalars)
                     if vector.count == Self.dimension {
