@@ -333,18 +333,16 @@ private final class ClientMutex: @unchecked Sendable {
 
     func increment() -> Int {
         os_unfair_lock_lock(_lock)
+        defer { os_unfair_lock_unlock(_lock) }
         count += 1
-        let result = count
-        os_unfair_lock_unlock(_lock)
-        return result
+        return count
     }
 
     func decrement() -> Int {
         os_unfair_lock_lock(_lock)
+        defer { os_unfair_lock_unlock(_lock) }
         count -= 1
-        let result = count
-        os_unfair_lock_unlock(_lock)
-        return result
+        return count
     }
 }
 
@@ -366,20 +364,19 @@ private final class ActiveClientsMutex: @unchecked Sendable {
 
     func add(id: UUID, task: Task<Void, Never>) {
         os_unfair_lock_lock(_lock)
+        defer { os_unfair_lock_unlock(_lock) }
         tasks[id] = task
-        os_unfair_lock_unlock(_lock)
     }
 
     func remove(id: UUID) {
         os_unfair_lock_lock(_lock)
+        defer { os_unfair_lock_unlock(_lock) }
         tasks.removeValue(forKey: id)
-        os_unfair_lock_unlock(_lock)
     }
 
     func getAll() -> [Task<Void, Never>] {
         os_unfair_lock_lock(_lock)
-        let result = Array(tasks.values)
-        os_unfair_lock_unlock(_lock)
-        return result
+        defer { os_unfair_lock_unlock(_lock) }
+        return Array(tasks.values)
     }
 }
