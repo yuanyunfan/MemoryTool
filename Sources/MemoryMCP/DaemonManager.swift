@@ -154,7 +154,7 @@ enum DaemonManager {
             }
         }
 
-        let addrLen = socklen_t(MemoryLayout<sa_family_t>.size + pathBytes.count)
+        let addrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
         let result = withUnsafePointer(to: &addr) { addrPtr in
             addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
                 Darwin.connect(fd, sockaddrPtr, addrLen)
@@ -210,7 +210,7 @@ enum DaemonManager {
             }
         }
 
-        let addrLen = socklen_t(MemoryLayout<sa_family_t>.size + pathBytes.count)
+        let addrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
         let bindResult = withUnsafePointer(to: &addr) { addrPtr in
             addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
                 bind(listenFd, sockaddrPtr, addrLen)
@@ -252,7 +252,7 @@ enum DaemonManager {
             }
         }
 
-        let addrLen = socklen_t(MemoryLayout<sa_family_t>.size + pathBytes.count)
+        let addrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
         let result = withUnsafePointer(to: &addr) { addrPtr in
             addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
                 Darwin.connect(fd, sockaddrPtr, addrLen)
