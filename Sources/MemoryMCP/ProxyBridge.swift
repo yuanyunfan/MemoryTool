@@ -124,8 +124,16 @@ enum ProxyBridge {
             let written = write(fd, buffer + totalWritten, count - totalWritten)
             if written <= 0 {
                 if errno == EAGAIN || errno == EWOULDBLOCK {
-                    // Brief spin for writable — in practice UDS buffers rarely fill
-                    usleep(100)
+                    // Use poll() to wait for fd to become writable instead of busy-spinning
+                    var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                    let pollResult = poll(&pfd, 1, 5000) // 5 second timeout
+                    if pollResult < 0 {
+                        return false // poll error
+                    }
+                    if pollResult == 0 {
+                        // Timeout — fd still not writable
+                        return false
+                    }
                     continue
                 }
                 return false
