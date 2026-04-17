@@ -319,21 +319,31 @@ actor UDSClientTransport: Transport {
 
 private final class ClientMutex: @unchecked Sendable {
     private var count = 0
-    private var _lock = os_unfair_lock()
+    private let _lock: UnsafeMutablePointer<os_unfair_lock>
+
+    init() {
+        _lock = .allocate(capacity: 1)
+        _lock.initialize(to: os_unfair_lock())
+    }
+
+    deinit {
+        _lock.deinitialize(count: 1)
+        _lock.deallocate()
+    }
 
     func increment() -> Int {
-        os_unfair_lock_lock(&_lock)
+        os_unfair_lock_lock(_lock)
         count += 1
         let result = count
-        os_unfair_lock_unlock(&_lock)
+        os_unfair_lock_unlock(_lock)
         return result
     }
 
     func decrement() -> Int {
-        os_unfair_lock_lock(&_lock)
+        os_unfair_lock_lock(_lock)
         count -= 1
         let result = count
-        os_unfair_lock_unlock(&_lock)
+        os_unfair_lock_unlock(_lock)
         return result
     }
 }
@@ -342,24 +352,34 @@ private final class ClientMutex: @unchecked Sendable {
 
 private final class ActiveClientsMutex: @unchecked Sendable {
     private var tasks: [UUID: Task<Void, Never>] = [:]
-    private var _lock = os_unfair_lock()
+    private let _lock: UnsafeMutablePointer<os_unfair_lock>
+
+    init() {
+        _lock = .allocate(capacity: 1)
+        _lock.initialize(to: os_unfair_lock())
+    }
+
+    deinit {
+        _lock.deinitialize(count: 1)
+        _lock.deallocate()
+    }
 
     func add(id: UUID, task: Task<Void, Never>) {
-        os_unfair_lock_lock(&_lock)
+        os_unfair_lock_lock(_lock)
         tasks[id] = task
-        os_unfair_lock_unlock(&_lock)
+        os_unfair_lock_unlock(_lock)
     }
 
     func remove(id: UUID) {
-        os_unfair_lock_lock(&_lock)
+        os_unfair_lock_lock(_lock)
         tasks.removeValue(forKey: id)
-        os_unfair_lock_unlock(&_lock)
+        os_unfair_lock_unlock(_lock)
     }
 
     func getAll() -> [Task<Void, Never>] {
-        os_unfair_lock_lock(&_lock)
+        os_unfair_lock_lock(_lock)
         let result = Array(tasks.values)
-        os_unfair_lock_unlock(&_lock)
+        os_unfair_lock_unlock(_lock)
         return result
     }
 }
