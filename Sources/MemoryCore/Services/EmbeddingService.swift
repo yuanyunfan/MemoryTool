@@ -230,11 +230,21 @@ public final class EmbeddingService: @unchecked Sendable {
 
 /// A simple unfair lock wrapper that is safe to use from both sync and async contexts.
 private final class Mutex: @unchecked Sendable {
-    private var _lock = os_unfair_lock()
+    private let _lock: UnsafeMutablePointer<os_unfair_lock>
+
+    init() {
+        _lock = .allocate(capacity: 1)
+        _lock.initialize(to: os_unfair_lock())
+    }
+
+    deinit {
+        _lock.deinitialize(count: 1)
+        _lock.deallocate()
+    }
 
     func withLock<T>(_ body: () -> T) -> T {
-        os_unfair_lock_lock(&_lock)
-        defer { os_unfair_lock_unlock(&_lock) }
+        os_unfair_lock_lock(_lock)
+        defer { os_unfair_lock_unlock(_lock) }
         return body()
     }
 }
