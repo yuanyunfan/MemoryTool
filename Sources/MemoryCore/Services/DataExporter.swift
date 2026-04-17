@@ -23,20 +23,7 @@ public struct DataExporter: Sendable {
 
     /// Exports all memories (including tags) as JSON `Data`.
     public static func exportToJSON(service: MemoryService) throws -> Data {
-        let memories = try service.listMemories(category: nil, limit: 100, offset: 0)
-        var allMemories = memories
-
-        // Fetch all if more than initial page
-        if memories.count == 100 {
-            var offset = 100
-            while true {
-                let batch = try service.listMemories(category: nil, limit: 100, offset: offset)
-                if batch.isEmpty { break }
-                allMemories.append(contentsOf: batch)
-                offset += batch.count
-                if batch.count < 100 { break }
-            }
-        }
+        let allMemories = try fetchAllMemories(service: service)
 
         // Build export entries with tags
         var entries: [[String: Any]] = []
