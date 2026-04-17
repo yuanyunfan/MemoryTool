@@ -242,6 +242,55 @@ public final class AppDatabase: Sendable {
             )
         }
 
+        // v4: Fix FTS5 content sync to use stable text id instead of rowid
+        migrator.registerMigration("v4_fts_id_fix") { db in
+            // Drop old triggers and FTS table
+            try db.execute(sql: "DROP TRIGGER IF EXISTS memory_ai")
+            try db.execute(sql: "DROP TRIGGER IF EXISTS memory_ad")
+            try db.execute(sql: "DROP TRIGGER IF EXISTS memory_au")
+            try db.execute(sql: "DROP TABLE IF EXISTS memory_fts")
+
+            // Recreate FTS5 as a standalone table (no external content) with
+            // an id column so we can join back to the memory table reliably.
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE memory_fts USING fts5(
+                    id UNINDEXED,
+                    content,
+                    category,
+                    source,
+                    tokenize='trigram'
+                )
+                """)
+
+            // Populate FTS with existing data
+            try db.execute(sql: """
+                INSERT INTO memory_fts(id, content, category, source)
+                SELECT id, content, category, source FROM memory
+                """)
+
+            // Sync triggers
+            try db.execute(sql: """
+                CREATE TRIGGER memory_ai AFTER INSERT ON memory BEGIN
+                    INSERT INTO memory_fts(id, content, category, source)
+                    VALUES (NEW.id, NEW.content, NEW.category, NEW.source);
+                END
+                """)
+
+            try db.execute(sql: """
+                CREATE TRIGGER memory_ad AFTER DELETE ON memory BEGIN
+                    DELETE FROM memory_fts WHERE id = OLD.id;
+                END
+                """)
+
+            try db.execute(sql: """
+                CREATE TRIGGER memory_au AFTER UPDATE ON memory BEGIN
+                    DELETE FROM memory_fts WHERE id = OLD.id;
+                    INSERT INTO memory_fts(id, content, category, source)
+                    VALUES (NEW.id, NEW.content, NEW.category, NEW.source);
+                END
+                """)
+        }
+
         return migrator
     }
 
