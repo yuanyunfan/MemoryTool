@@ -29,6 +29,11 @@ public final class EmbeddingService: @unchecked Sendable {
     /// Embedding dimension (384 for multilingual-e5-small).
     public static let dimension: Int = 384
 
+    /// Bounded gate to prevent thread starvation deadlock in sync `embed()`.
+    /// Limits concurrent blocking calls so GCD threads remain available for
+    /// the inner Swift concurrency Tasks to complete. (Issue #39)
+    private static let syncEmbedGate = DispatchSemaphore(value: 8)
+
     /// Whether the embedding model is loaded and ready.
     public private(set) var isAvailable: Bool = false
 
@@ -128,16 +133,22 @@ public final class EmbeddingService: @unchecked Sendable {
     /// - Important: Prefer `embedAsync()` from async contexts to avoid deadlocks.
     ///   This sync version dispatches the semaphore wait to a non-cooperative GCD
     ///   thread to prevent deadlocking Swift concurrency's cooperative thread pool.
+    ///
+    ///   A bounded concurrency gate limits the number of simultaneous sync embed
+    ///   calls to prevent thread starvation deadlock when many callers block GCD
+    ///   threads concurrently (see Issue #39).
     public func embed(_ text: String, isQuery: Bool = true) -> [Float]? {
         guard let modelBundle, isAvailable else { return nil }
 
         let prefix = isQuery ? "query: " : "passage: "
         let prefixedText = prefix + text
 
-        // Dispatch to a dedicated GCD thread so the semaphore.wait() never blocks
-        // a Swift concurrency cooperative thread. The inner Task may need a
-        // cooperative thread to run; if we blocked one with semaphore.wait(),
-        // that could cause a deadlock under load.
+        // Limit concurrent sync calls to avoid exhausting GCD's thread pool (~64).
+        // Each call blocks a GCD thread while waiting for a Swift concurrency Task;
+        // if all threads are blocked, the inner Tasks can never complete.
+        Self.syncEmbedGate.wait()
+        defer { Self.syncEmbedGate.signal() }
+
         let resultBox = ThreadSafeBox<[Float]>()
         let outerSemaphore = DispatchSemaphore(value: 0)
 
