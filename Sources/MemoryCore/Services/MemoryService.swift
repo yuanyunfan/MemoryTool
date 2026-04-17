@@ -474,7 +474,7 @@ public final class MemoryService: Sendable {
                 unionParts.append("""
                     SELECT memory.*, memory_fts.rank AS search_rank
                     FROM memory
-                    INNER JOIN memory_fts ON memory_fts.rowid = memory.rowid
+                    INNER JOIN memory_fts ON memory_fts.id = memory.id
                         AND memory_fts MATCH ?
                     """)
                 arguments.append(ftsQuery)
