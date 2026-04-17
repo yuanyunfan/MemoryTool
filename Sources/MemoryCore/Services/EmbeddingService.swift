@@ -2,6 +2,17 @@ import Accelerate
 import Embeddings
 import Foundation
 
+/// A thread-safe container for passing values across concurrency domains.
+private final class ThreadSafeBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value: T?
+
+    var value: T? {
+        get { lock.lock(); defer { lock.unlock() }; return _value }
+        set { lock.lock(); defer { lock.unlock() }; _value = newValue }
+    }
+}
+
 /// Provides multilingual text embedding using `intfloat/multilingual-e5-small`.
 ///
 /// Single model, single vector space for 100+ languages — Chinese and English
@@ -127,7 +138,7 @@ public final class EmbeddingService: @unchecked Sendable {
         // a Swift concurrency cooperative thread. The inner Task may need a
         // cooperative thread to run; if we blocked one with semaphore.wait(),
         // that could cause a deadlock under load.
-        nonisolated(unsafe) var result: [Float]?
+        let resultBox = ThreadSafeBox<[Float]>()
         let outerSemaphore = DispatchSemaphore(value: 0)
 
         DispatchQueue.global().async {
@@ -139,7 +150,7 @@ public final class EmbeddingService: @unchecked Sendable {
                     let shaped = await encoded.cast(to: Float.self).shapedArray(of: Float.self)
                     let vector = Array(shaped.scalars)
                     if vector.count == Self.dimension {
-                        result = self.l2Normalize(vector)
+                        resultBox.value = self.l2Normalize(vector)
                     } else {
                         logToStderr("EmbeddingService: Unexpected dimension \(vector.count), expected \(Self.dimension)")
                     }
@@ -154,7 +165,7 @@ public final class EmbeddingService: @unchecked Sendable {
         }
 
         outerSemaphore.wait()
-        return result
+        return resultBox.value
     }
 
     /// Encode embedding to Data for SQLite BLOB storage.
