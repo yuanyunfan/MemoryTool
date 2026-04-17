@@ -65,7 +65,13 @@ enum DaemonManager {
     /// This method acquires an exclusive file lock (flock) to prevent a race
     /// condition where two processes starting simultaneously could both detect
     /// no existing daemon and both attempt to become the daemon.
-    static func detectRole() -> Role {
+    ///
+    /// When the role is `.daemon`, the listening socket is created and the PID
+    /// file is written **while still holding the lock**, so that a second process
+    /// running `detectRole()` concurrently will see both a live PID and a
+    /// connectable socket. The caller receives the listening fd via the
+    /// returned tuple and must pass it to `becomeDaemon(listenFd:)`.
+    static func detectRole() -> (Role, Int32?) {
         // Ensure the directory exists
         let dir = (lockFilePath as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(
@@ -77,21 +83,29 @@ enum DaemonManager {
         let lockFd = open(lockFilePath, O_CREAT | O_RDWR, 0o644)
         guard lockFd >= 0 else {
             // If we can't open the lock file, fall back to the old behavior
-            return detectRoleUnlocked()
+            return (detectRoleUnlocked(), nil)
         }
 
         // Acquire an exclusive lock — this blocks until the lock is available
         guard flock(lockFd, LOCK_EX) == 0 else {
             close(lockFd)
-            return detectRoleUnlocked()
+            return (detectRoleUnlocked(), nil)
         }
 
         let role = detectRoleUnlocked()
 
+        var listenFd: Int32? = nil
+
         if role == .daemon {
-            // Write PID file while still holding the lock so that another
-            // process starting concurrently will see our PID before it can
-            // finish its own detectRole().
+            // Create the listening socket and write the PID file while still
+            // holding the lock.  This ensures that any concurrent process
+            // running detectRole() will find both a live PID **and** a
+            // connectable socket, so it correctly becomes a proxy instead of
+            // a second daemon.
+            if let fd = try? createListeningSocket() {
+                listenFd = fd
+            }
+
             let pid = ProcessInfo.processInfo.processIdentifier
             try? "\(pid)".write(toFile: pidFilePath, atomically: true, encoding: .utf8)
         }
@@ -100,7 +114,7 @@ enum DaemonManager {
         flock(lockFd, LOCK_UN)
         close(lockFd)
 
-        return role
+        return (role, listenFd)
     }
 
     /// Internal role detection logic without locking.
@@ -152,16 +166,26 @@ enum DaemonManager {
 
     // MARK: - Daemon Lifecycle
 
-    /// Write PID file and create the listening socket.
-    /// Returns the listening file descriptor.
+    /// Write PID file and return the listening socket.
     ///
-    /// Note: The PID file is already written atomically by `detectRole()` while
-    /// holding the lock file, so we only update it here as a safety measure.
-    static func becomeDaemon() throws -> Int32 {
+    /// If `listenFd` is provided (created earlier by `detectRole()` while
+    /// holding the lock), it is reused directly.  Otherwise a new listening
+    /// socket is created as a fallback.
+    static func becomeDaemon(listenFd existingFd: Int32? = nil) throws -> Int32 {
         // Write PID file (may already exist from detectRole, but re-write to be safe)
         let pid = ProcessInfo.processInfo.processIdentifier
         try "\(pid)".write(toFile: pidFilePath, atomically: true, encoding: .utf8)
 
+        if let fd = existingFd {
+            return fd
+        }
+
+        // Fallback: create listening socket now
+        return try createListeningSocket()
+    }
+
+    /// Create a Unix Domain Socket, bind, and listen.  Returns the fd.
+    private static func createListeningSocket() throws -> Int32 {
         // Remove stale socket file
         unlink(socketPath)
 

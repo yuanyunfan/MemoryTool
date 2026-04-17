@@ -42,7 +42,7 @@ func createDatabase() throws -> AppDatabase {
 logToStderr("Starting...")
 
 do {
-    let role = DaemonManager.detectRole()
+    let (role, earlyListenFd) = DaemonManager.detectRole()
 
     switch role {
     case .proxy:
@@ -113,7 +113,7 @@ do {
         try await server.start(transport: transport)
 
         // Start UDS listener for proxy clients
-        let listenFd = try DaemonManager.becomeDaemon()
+        let listenFd = try DaemonManager.becomeDaemon(listenFd: earlyListenFd)
         logToStderr("Daemon listening on \(DaemonManager.socketPath)")
 
         let clientManager = ClientManager(handler: handler)
