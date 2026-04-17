@@ -16,10 +16,22 @@ enum DaemonManager {
 
     // MARK: - Configuration
 
+    /// Maximum byte length for a Unix Domain Socket path (sun_path).
+    /// macOS: 104, Linux: 108. We use 104 to be safe.
+    private static let maxSocketPathLength = 104
+
     /// Path to the Unix Domain Socket.
+    /// Falls back to `/tmp/memorytool-<uid>.sock` if the home-based path
+    /// would exceed the platform's `sun_path` limit.
     static let socketPath: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/.memorytool/mcp.sock"
+        let preferred = "\(home)/.memorytool/mcp.sock"
+        // utf8CString includes the null terminator, so count must be <= maxSocketPathLength
+        if preferred.utf8CString.count <= maxSocketPathLength {
+            return preferred
+        }
+        let uid = getuid()
+        return "/tmp/memorytool-\(uid).sock"
     }()
 
     /// Path to the daemon PID file.
@@ -204,6 +216,10 @@ enum DaemonManager {
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = socketPath.utf8CString
+        guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
+            close(fd)
+            throw DaemonError.socketPathTooLong
+        }
 
         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
             let bound = UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: CChar.self)
