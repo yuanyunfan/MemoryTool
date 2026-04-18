@@ -482,23 +482,30 @@ public final class MemoryService: Sendable {
             var arguments: [any DatabaseValueConvertible] = []
 
             if !ftsTerms.isEmpty {
-                let ftsQuery = ftsTerms.map { term in
-                    // Strip FTS5 special characters: double quotes, asterisks, carets, colons, parentheses, plus, minus, NOT/AND/OR/NEAR handled by quoting
+                let ftsQuery = ftsTerms.compactMap { term -> String? in
+                    // Strip all FTS5 special characters before double-quoting to prevent injection
                     let sanitized = term
                         .replacingOccurrences(of: "\\", with: "")
-                        .replacingOccurrences(of: "\"", with: "\"\"")
+                        .replacingOccurrences(of: "\"", with: "")
+                        .replacingOccurrences(of: "(", with: "")
+                        .replacingOccurrences(of: ")", with: "")
                         .replacingOccurrences(of: ":", with: "")
                         .replacingOccurrences(of: "*", with: "")
                         .replacingOccurrences(of: "^", with: "")
+                        .replacingOccurrences(of: "+", with: "")
+                        .replacingOccurrences(of: "-", with: "")
+                    guard !sanitized.isEmpty else { return nil }
                     return "\"\(sanitized)\""
                 }.joined(separator: " OR ")
-                unionParts.append("""
-                    SELECT memory.*, memory_fts.rank AS search_rank
-                    FROM memory
-                    INNER JOIN memory_fts ON memory_fts.id = memory.id
-                        AND memory_fts MATCH ?
-                    """)
-                arguments.append(ftsQuery)
+                if !ftsQuery.isEmpty {
+                    unionParts.append("""
+                        SELECT memory.*, memory_fts.rank AS search_rank
+                        FROM memory
+                        INNER JOIN memory_fts ON memory_fts.id = memory.id
+                            AND memory_fts MATCH ?
+                        """)
+                    arguments.append(ftsQuery)
+                }
             }
 
             for term in likeTerms {
