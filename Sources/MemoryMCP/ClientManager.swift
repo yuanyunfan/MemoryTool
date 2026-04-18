@@ -158,12 +158,8 @@ final class ClientManager: @unchecked Sendable {
         do {
             try await clientServer.start(transport: transport)
 
-            // Keep alive until the transport disconnects.
-            // The server.start() handles message routing internally.
-            // We wait until the transport's readLoop detects EOF.
-            while !Task.isCancelled {
-                try await Task.sleep(for: .seconds(60))
-            }
+            // Wait until the transport disconnects (e.g. EOF).
+            await clientServer.waitUntilCompleted()
         } catch {
             logToStderr("Daemon: client handler ended: \(error.localizedDescription)")
         }
