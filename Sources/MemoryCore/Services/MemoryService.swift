@@ -104,16 +104,25 @@ public final class MemoryService: Sendable {
         tags: [String]?,
         metadata: String?
     ) throws -> Memory {
+        // Generate embedding once and reuse for both dedup check and storage
+        let embeddingVec = embeddingService?.embed(content, isQuery: false)
+
         // Semantic deduplication: if a similar memory exists, update it instead
-        let dupResult = try checkDuplicate(content: content)
-        if case .similarExists(let existingId, _) = dupResult {
-            if let updated = try updateMemory(id: existingId, content: content, category: category, source: source, metadata: metadata) {
-                return updated
+        if let queryVec = embeddingVec {
+            let results = try batchedEmbeddingSearch(
+                query: queryVec,
+                topK: 1,
+                threshold: 0.85
+            )
+            if let top = results.first {
+                if let updated = try updateMemory(id: top.id, content: content, category: category, source: source, metadata: metadata) {
+                    return updated
+                }
             }
         }
 
-        // Generate embedding
-        let embeddingData = embeddingService?.embed(content, isQuery: false)
+        // Encode the pre-computed embedding for storage
+        let embeddingData = embeddingVec
             .map { EmbeddingService.encodeEmbedding($0) }
 
         let memory = Memory(
