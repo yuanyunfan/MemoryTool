@@ -119,9 +119,15 @@ do {
         let clientManager = ClientManager(handler: handler)
 
         // Register cleanup handler with graceful shutdown
+        var shutdownInProgress = false
         let signalSources = [SIGTERM, SIGINT].map { sig -> DispatchSourceSignal in
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler {
+                guard !shutdownInProgress else {
+                    logToStderr("Received signal \(sig) again, shutdown already in progress. Ignoring.")
+                    return
+                }
+                shutdownInProgress = true
                 logToStderr("Received signal \(sig), initiating graceful shutdown...")
 
                 Task {
