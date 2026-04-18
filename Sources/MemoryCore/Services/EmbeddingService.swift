@@ -48,6 +48,12 @@ public final class EmbeddingService: @unchecked Sendable {
     /// Mutex for thread-safe lazy loading state management.
     private let stateMutex = Mutex()
 
+    /// Serializes sync callers waiting for model load so only one Task is spawned.
+    /// Once signaled (after first load completes or was already done), subsequent
+    /// callers pass through immediately via `syncLoadCompleted`.
+    private let syncLoadLock = DispatchSemaphore(value: 1)
+    private var syncLoadCompleted = false
+
     public init() {}
 
     // MARK: - Setup
@@ -142,15 +148,26 @@ public final class EmbeddingService: @unchecked Sendable {
     ///   calls to prevent thread starvation deadlock when many callers block GCD
     ///   threads concurrently (see Issue #39).
     public func embed(_ text: String, isQuery: Bool = true) -> [Float]? {
-        // Trigger lazy model loading if needed (mirrors embedAsync's ensureLoaded call).
-        let loadSemaphore = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            Task {
-                await self.ensureLoaded()
-                loadSemaphore.signal()
+        // Trigger lazy model loading if needed. Uses a serialization lock so that
+        // only ONE caller spawns a Task + blocks a GCD thread for ensureLoaded().
+        // Other concurrent callers wait on the lock and then skip the load entirely.
+        // This prevents N concurrent callers from each blocking a GCD thread on
+        // their own semaphore, which could exhaust the thread pool (Issue #92).
+        if !syncLoadCompleted {
+            syncLoadLock.wait()
+            if !syncLoadCompleted {
+                let loadSemaphore = DispatchSemaphore(value: 0)
+                DispatchQueue.global().async {
+                    Task {
+                        await self.ensureLoaded()
+                        loadSemaphore.signal()
+                    }
+                }
+                loadSemaphore.wait()
+                syncLoadCompleted = true
             }
+            syncLoadLock.signal()
         }
-        loadSemaphore.wait()
 
         let bundle = stateMutex.withLock { () -> ModelBundle? in
             guard let modelBundle, isAvailable else { return nil }
@@ -164,6 +181,8 @@ public final class EmbeddingService: @unchecked Sendable {
         // Limit concurrent sync calls to avoid exhausting GCD's thread pool (~64).
         // Each call blocks a GCD thread while waiting for a Swift concurrency Task;
         // if all threads are blocked, the inner Tasks can never complete.
+        // NOTE: The gate is acquired AFTER ensureLoaded() completes to avoid deadlock
+        // when 8+ concurrent calls arrive during cold start (Issue #92).
         Self.syncEmbedGate.wait()
         defer { Self.syncEmbedGate.signal() }
 
