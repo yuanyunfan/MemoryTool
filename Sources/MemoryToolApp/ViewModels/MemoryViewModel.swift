@@ -227,8 +227,7 @@ final class MemoryViewModel {
         if category == nil {
             return totalCount
         }
-        guard let counts = try? service.listCategoriesWithCounts() else { return 0 }
-        return counts.first(where: { $0.category == category })?.count ?? 0
+        return (try? service.countMemories(category: category)) ?? 0
     }
 
     // MARK: - Filters

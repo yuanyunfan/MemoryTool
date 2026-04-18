@@ -808,6 +808,13 @@ public final class MemoryService: Sendable {
         }
     }
 
+    /// Returns the number of memories in a specific category using a COUNT query.
+    public func countMemories(category: String) throws -> Int {
+        try db.reader().read { dbConn in
+            try Memory.filter(Column("category") == category).fetchCount(dbConn)
+        }
+    }
+
     // MARK: - Embedding Management
 
     /// Generate and store embeddings for all memories that don't have one yet.
