@@ -101,13 +101,17 @@ public final class EmbeddingService: @unchecked Sendable {
     /// - Returns: L2-normalized 384-dim Float array, or nil if model unavailable.
     public func embedAsync(_ text: String, isQuery: Bool = true) async -> [Float]? {
         await ensureLoaded()
-        guard let modelBundle, isAvailable else { return nil }
+        let bundle: XLMRoberta.ModelBundle? = stateMutex.withLock {
+            guard let modelBundle, isAvailable else { return nil }
+            return modelBundle
+        }
+        guard let bundle else { return nil }
 
         let prefix = isQuery ? "query: " : "passage: "
         let prefixedText = prefix + text
 
         do {
-            let encoded = try modelBundle.encode(prefixedText)
+            let encoded = try bundle.encode(prefixedText)
             let shaped = await encoded.cast(to: Float.self).shapedArray(of: Float.self)
             let vector = Array(shaped.scalars)
             if vector.count == Self.dimension {
