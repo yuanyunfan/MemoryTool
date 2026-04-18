@@ -241,6 +241,8 @@ actor UDSClientTransport: Transport {
         messageWithNewline.append(UInt8(ascii: "\n"))
 
         var remaining = messageWithNewline
+        let maxRetries = 500 // ~5 seconds total with 10ms sleep
+        var retryCount = 0
         while !remaining.isEmpty {
             do {
                 let written = try remaining.withUnsafeBytes { buffer in
@@ -248,8 +250,14 @@ actor UDSClientTransport: Transport {
                 }
                 if written > 0 {
                     remaining = remaining.dropFirst(written)
+                    retryCount = 0
                 }
             } catch let error where isResourceTemporarilyUnavailable(error) {
+                retryCount += 1
+                if retryCount >= maxRetries {
+                    isConnected = false
+                    throw MCPError.transportError(Errno(rawValue: ETIMEDOUT))
+                }
                 try await Task.sleep(for: .milliseconds(10))
                 continue
             } catch {
