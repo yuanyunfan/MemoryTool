@@ -86,6 +86,14 @@ public final class MemoryService: Sendable {
         tags: [String]? = nil,
         metadata: String? = nil
     ) throws -> Memory {
+        // Semantic deduplication: if a similar memory exists, update it instead
+        let dupResult = try checkDuplicate(content: content)
+        if case .similarExists(let existingId, _) = dupResult {
+            if let updated = try updateMemory(id: existingId, content: content, category: category, source: source, metadata: metadata) {
+                return updated
+            }
+        }
+
         // Generate embedding
         let embeddingData = embeddingService?.embed(content, isQuery: false)
             .map { EmbeddingService.encodeEmbedding($0) }
@@ -123,6 +131,14 @@ public final class MemoryService: Sendable {
         tags: [String]? = nil,
         metadata: String? = nil
     ) async throws -> Memory {
+        // Semantic deduplication: if a similar memory exists, update it instead
+        let dupResult = try await checkDuplicateAsync(content: content)
+        if case .similarExists(let existingId, _) = dupResult {
+            if let updated = try await updateMemoryAsync(id: existingId, content: content, category: category, source: source, metadata: metadata) {
+                return updated
+            }
+        }
+
         // Generate embedding using async API
         let embeddingData: Data?
         if let embeddingService {
