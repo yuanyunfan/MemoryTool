@@ -31,7 +31,13 @@ enum DaemonManager {
             return preferred
         }
         let uid = getuid()
-        return "/tmp/memorytool-\(uid).sock"
+        let tmpDir = "/tmp/memorytool-\(uid)"
+        try? FileManager.default.createDirectory(
+            atPath: tmpDir,
+            withIntermediateDirectories: true
+        )
+        chmod(tmpDir, 0o700)
+        return "\(tmpDir)/mcp.sock"
     }()
 
     /// Path to the daemon PID file.
@@ -221,6 +227,9 @@ enum DaemonManager {
             close(listenFd)
             throw DaemonError.bindFailed(errno: errno)
         }
+
+        // Restrict socket file permissions to owner-only (0600)
+        chmod(socketPath, 0o600)
 
         guard listen(listenFd, 16) == 0 else {
             close(listenFd)
