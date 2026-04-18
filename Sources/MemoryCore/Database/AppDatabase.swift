@@ -58,6 +58,15 @@ public final class AppDatabase: Sendable {
         self.dbWriter = dbWriter
     }
 
+    /// Explicitly closes the database connection, ensuring WAL/SHM files are cleaned up.
+    public func close() throws {
+        if let pool = dbWriter as? DatabasePool {
+            try pool.close()
+        } else if let queue = dbWriter as? DatabaseQueue {
+            try queue.close()
+        }
+    }
+
     // MARK: - Access
 
     /// Provides read access to the database.
