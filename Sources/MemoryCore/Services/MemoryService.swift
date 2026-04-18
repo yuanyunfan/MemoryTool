@@ -34,10 +34,8 @@ public final class MemoryService: Sendable {
             return .noDuplicate
         }
 
-        let candidates = try loadEmbeddings()
-        let results = EmbeddingService.search(
+        let results = try batchedEmbeddingSearch(
             query: queryVec,
-            candidates: candidates,
             topK: 1,
             threshold: 0.85
         )
@@ -58,10 +56,8 @@ public final class MemoryService: Sendable {
             return .noDuplicate
         }
 
-        let candidates = try loadEmbeddings()
-        let results = EmbeddingService.search(
+        let results = try batchedEmbeddingSearch(
             query: queryVec,
-            candidates: candidates,
             topK: 1,
             threshold: 0.85
         )
@@ -374,10 +370,10 @@ public final class MemoryService: Sendable {
         // Phase 2: Semantic search (if embedding available)
         var semanticScores: [String: Float] = [:]
         if let embeddingService, let queryVec = embeddingService.embed(query) {
-            let candidates = try loadEmbeddings(category: category, tags: tags)
-            let semanticResults = EmbeddingService.search(
+            let semanticResults = try batchedEmbeddingSearch(
                 query: queryVec,
-                candidates: candidates,
+                category: category,
+                tags: tags,
                 topK: effectiveLimit * 3,
                 threshold: 0.3
             )
@@ -422,10 +418,10 @@ public final class MemoryService: Sendable {
         var semanticScores: [String: Float] = [:]
         if let embeddingService {
             if let queryVec = await embeddingService.embedAsync(query) {
-                let candidates = try loadEmbeddings(category: category, tags: tags)
-                let semanticResults = EmbeddingService.search(
+                let semanticResults = try batchedEmbeddingSearch(
                     query: queryVec,
-                    candidates: candidates,
+                    category: category,
+                    tags: tags,
                     topK: effectiveLimit * 3,
                     threshold: 0.3
                 )
@@ -584,10 +580,51 @@ public final class MemoryService: Sendable {
 
     // MARK: - Embedding Helpers
 
-    /// Load all embeddings from database for vector search.
+    /// Batched vector search: loads embeddings in batches to avoid unbounded memory usage,
+    /// accumulating the top-K results across all batches.
+    private static let embeddingBatchSize = 10_000
+
+    private func batchedEmbeddingSearch(
+        query: [Float],
+        category: String? = nil,
+        tags: [String]? = nil,
+        topK: Int = 10,
+        threshold: Float = 0.3
+    ) throws -> [(id: String, similarity: Float)] {
+        var accumulated: [(id: String, similarity: Float)] = []
+        var offset = 0
+        let batchSize = Self.embeddingBatchSize
+
+        while true {
+            let batch = try loadEmbeddings(category: category, tags: tags, limit: batchSize, offset: offset)
+            if batch.isEmpty { break }
+
+            let batchResults = EmbeddingService.search(
+                query: query,
+                candidates: batch,
+                topK: topK,
+                threshold: threshold
+            )
+            accumulated.append(contentsOf: batchResults)
+            // Keep only topK across accumulated results
+            accumulated.sort { $0.similarity > $1.similarity }
+            if accumulated.count > topK {
+                accumulated = Array(accumulated.prefix(topK))
+            }
+
+            if batch.count < batchSize { break }
+            offset += batchSize
+        }
+
+        return accumulated
+    }
+
+    /// Load embeddings from database for vector search with pagination.
     private func loadEmbeddings(
         category: String? = nil,
-        tags: [String]? = nil
+        tags: [String]? = nil,
+        limit: Int = 10_000,
+        offset: Int = 0
     ) throws -> [(id: String, embedding: [Float])] {
         try db.reader().read { dbConn in
             var sql = "SELECT id, embedding FROM memory WHERE embedding IS NOT NULL"
@@ -612,6 +649,10 @@ public final class MemoryService: Sendable {
                 for tag in tags { arguments.append(tag) }
                 arguments.append(tags.count)
             }
+
+            sql += " ORDER BY id LIMIT ? OFFSET ?"
+            arguments.append(limit)
+            arguments.append(offset)
 
             let rows = try Row.fetchAll(dbConn, sql: sql, arguments: StatementArguments(arguments))
             return rows.compactMap { row -> (id: String, embedding: [Float])? in
