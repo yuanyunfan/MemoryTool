@@ -25,8 +25,9 @@ enum ProxyBridge {
         let stdinFd = FileHandle.standardInput.fileDescriptor
         let stdoutFd = FileHandle.standardOutput.fileDescriptor
 
-        // Set both fds to non-blocking so reads don't block after poll() wakeup
+        // Set all fds to non-blocking so reads/writes don't block after poll() wakeup
         setNonBlocking(stdinFd)
+        setNonBlocking(stdoutFd)
         setNonBlocking(daemonFd)
 
         let bufferSize = 65536
