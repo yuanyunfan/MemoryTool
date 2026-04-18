@@ -140,7 +140,15 @@ do {
                     // 3. Wait for in-flight proxy client requests to complete (with timeout)
                     await clientManager.gracefulShutdown(timeout: .seconds(5))
 
-                    // 4. Clean up daemon files (listen socket is closed by acceptLoop)
+                    // 4. Close the database to ensure WAL/SHM files are cleaned up
+                    do {
+                        try database.close()
+                        logToStderr("Database closed successfully.")
+                    } catch {
+                        logToStderr("Warning: failed to close database: \(error)")
+                    }
+
+                    // 5. Clean up daemon files (listen socket is closed by acceptLoop)
                     DaemonManager.cleanupDaemon()
 
                     logToStderr("Graceful shutdown complete, exiting.")
