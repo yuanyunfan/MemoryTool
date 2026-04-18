@@ -54,65 +54,38 @@ struct ToolHandler: Sendable {
         let tags = extractTags(from: arguments)
 
         do {
-            // Deduplication check
-            let dupCheck = try await service.checkDuplicateAsync(content: content)
+            // Rely on createMemoryAsync's built-in deduplication to avoid
+            // redundant embedding computation and double DB writes.
+            let memory = try await service.createMemoryAsync(
+                content: content,
+                category: category,
+                source: source,
+                tags: tags,
+                metadata: userMetadata
+            )
 
-            switch dupCheck {
-            case .similarExists(let existingId, let similarity):
-                // Replace: use the newer content instead of appending to avoid unbounded growth
-                let _ = try await service.updateMemoryAsync(id: existingId, content: content)
+            // Detect whether createMemoryAsync merged with an existing memory
+            // by checking if the memory existed before this call (createdAt < updatedAt).
+            let wasMerged = memory.createdAt < memory.updatedAt
 
-                // Merge tags if provided
+            if wasMerged {
+                // Ensure tags are also merged for deduplicated memories
                 if let tags, !tags.isEmpty {
-                    try service.addTags(to: existingId, tags: tags)
+                    try service.addTags(to: memory.id, tags: tags)
                 }
 
                 let response: [String: Any] = [
-                    "id": existingId,
-                    "message": "Merged with existing similar memory (similarity: \(String(format: "%.2f", similarity))).",
+                    "id": memory.id,
+                    "message": "Merged with existing similar memory.",
                     "deduplicated": true,
-                    "similarity": similarity,
                 ]
                 return textResult(toJSON(response))
-
-            case .noDuplicate:
-                do {
-                    let memory = try await service.createMemoryAsync(
-                        content: content,
-                        category: category,
-                        source: source,
-                        tags: tags,
-                        metadata: userMetadata
-                    )
-
-                    let response: [String: Any] = [
-                        "id": memory.id,
-                        "message": "Memory stored successfully.",
-                    ]
-                    return textResult(toJSON(response))
-                } catch {
-                    // Handle race condition: if a concurrent request inserted the same
-                    // content_hash between our dedup check and insert, retry as an update.
-                    let errorDesc = String(describing: error)
-                    if errorDesc.contains("UNIQUE constraint failed") && errorDesc.contains("content_hash") {
-                        // Re-run dedup check to find the existing memory
-                        let retryCheck = try await service.checkDuplicateAsync(content: content)
-                        if case .similarExists(let existingId, let similarity) = retryCheck {
-                            let _ = try await service.updateMemoryAsync(id: existingId, content: content)
-                            if let tags, !tags.isEmpty {
-                                try service.addTags(to: existingId, tags: tags)
-                            }
-                            let response: [String: Any] = [
-                                "id": existingId,
-                                "message": "Merged with existing similar memory (similarity: \(String(format: "%.2f", similarity))).",
-                                "deduplicated": true,
-                                "similarity": similarity,
-                            ]
-                            return textResult(toJSON(response))
-                        }
-                    }
-                    throw error
-                }
+            } else {
+                let response: [String: Any] = [
+                    "id": memory.id,
+                    "message": "Memory stored successfully.",
+                ]
+                return textResult(toJSON(response))
             }
         } catch {
             return errorResult("Failed to store memory: \(error.localizedDescription)")
