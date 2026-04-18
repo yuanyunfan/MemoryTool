@@ -142,6 +142,16 @@ public final class EmbeddingService: @unchecked Sendable {
     ///   calls to prevent thread starvation deadlock when many callers block GCD
     ///   threads concurrently (see Issue #39).
     public func embed(_ text: String, isQuery: Bool = true) -> [Float]? {
+        // Trigger lazy model loading if needed (mirrors embedAsync's ensureLoaded call).
+        let loadSemaphore = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            Task {
+                await self.ensureLoaded()
+                loadSemaphore.signal()
+            }
+        }
+        loadSemaphore.wait()
+
         let bundle = stateMutex.withLock { () -> ModelBundle? in
             guard let modelBundle, isAvailable else { return nil }
             return modelBundle
