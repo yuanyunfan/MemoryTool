@@ -834,7 +834,13 @@ public final class MemoryService: Sendable {
     // MARK: - Embedding Management
 
     /// Generate and store embeddings for all memories that don't have one yet.
-    public func backfillEmbeddings() throws -> Int {
+    ///
+    /// Embeddings are written in batches (default 50) within a single transaction per batch
+    /// to reduce inconsistency if the process is interrupted mid-backfill. If a memory is
+    /// deleted between the read and write phases, the UPDATE safely affects 0 rows.
+    /// Note: if the process crashes mid-backfill, some memories may have embeddings while
+    /// others do not, which can bias semantic search results. Re-run backfill to complete.
+    public func backfillEmbeddings(batchSize: Int = 50) throws -> Int {
         guard let embeddingService else { return 0 }
 
         let memories = try db.reader().read { dbConn in
@@ -842,25 +848,53 @@ public final class MemoryService: Sendable {
         }
 
         var count = 0
+        var batch: [(Data, String)] = []
+
         for memory in memories {
             if let vector = embeddingService.embed(memory.content, isQuery: false) {
                 let data = EmbeddingService.encodeEmbedding(vector)
+                batch.append((data, memory.id))
+            }
+
+            if batch.count >= batchSize {
                 try db.writer().write { dbConn in
-                    try dbConn.execute(
-                        sql: "UPDATE memory SET embedding = ? WHERE id = ?",
-                        arguments: [data, memory.id]
-                    )
+                    for (data, id) in batch {
+                        try dbConn.execute(
+                            sql: "UPDATE memory SET embedding = ? WHERE id = ?",
+                            arguments: [data, id]
+                        )
+                    }
                 }
-                count += 1
+                count += batch.count
+                batch.removeAll(keepingCapacity: true)
             }
         }
+
+        // Write remaining batch
+        if !batch.isEmpty {
+            try db.writer().write { dbConn in
+                for (data, id) in batch {
+                    try dbConn.execute(
+                        sql: "UPDATE memory SET embedding = ? WHERE id = ?",
+                        arguments: [data, id]
+                    )
+                }
+            }
+            count += batch.count
+        }
+
         return count
     }
 
     /// Generate and store embeddings for all memories that don't have one yet (async version).
     ///
     /// Prefer this over the sync version when calling from async contexts.
-    public func backfillEmbeddingsAsync() async throws -> Int {
+    /// Embeddings are written in batches (default 50) within a single transaction per batch
+    /// to reduce inconsistency if the process is interrupted mid-backfill. If a memory is
+    /// deleted between the read and write phases, the UPDATE safely affects 0 rows.
+    /// Note: if the process crashes mid-backfill, some memories may have embeddings while
+    /// others do not, which can bias semantic search results. Re-run backfill to complete.
+    public func backfillEmbeddingsAsync(batchSize: Int = 50) async throws -> Int {
         guard let embeddingService else { return 0 }
 
         let memories = try await db.reader().read { dbConn in
@@ -868,18 +902,43 @@ public final class MemoryService: Sendable {
         }
 
         var count = 0
+        var batch: [(Data, String)] = []
+
         for memory in memories {
             if let vector = await embeddingService.embedAsync(memory.content, isQuery: false) {
                 let data = EmbeddingService.encodeEmbedding(vector)
+                batch.append((data, memory.id))
+            }
+
+            if batch.count >= batchSize {
+                let currentBatch = batch
                 try await db.writer().write { dbConn in
-                    try dbConn.execute(
-                        sql: "UPDATE memory SET embedding = ? WHERE id = ?",
-                        arguments: [data, memory.id]
-                    )
+                    for (data, id) in currentBatch {
+                        try dbConn.execute(
+                            sql: "UPDATE memory SET embedding = ? WHERE id = ?",
+                            arguments: [data, id]
+                        )
+                    }
                 }
-                count += 1
+                count += batch.count
+                batch.removeAll(keepingCapacity: true)
             }
         }
+
+        // Write remaining batch
+        if !batch.isEmpty {
+            let currentBatch = batch
+            try await db.writer().write { dbConn in
+                for (data, id) in currentBatch {
+                    try dbConn.execute(
+                        sql: "UPDATE memory SET embedding = ? WHERE id = ?",
+                        arguments: [data, id]
+                    )
+                }
+            }
+            count += batch.count
+        }
+
         return count
     }
 
