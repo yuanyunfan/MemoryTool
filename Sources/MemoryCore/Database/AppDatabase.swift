@@ -291,6 +291,19 @@ public final class AppDatabase: Sendable {
                 """)
         }
 
+        // v5: Make content_hash unique to prevent race-condition duplicates
+        migrator.registerMigration("v5_unique_content_hash") { db in
+            // Drop the old non-unique index
+            try db.execute(sql: "DROP INDEX IF EXISTS idx_memory_content_hash")
+            // Create a unique index (NULLs are allowed and not considered duplicates)
+            try db.create(
+                index: "idx_memory_content_hash",
+                on: "memory",
+                columns: ["content_hash"],
+                unique: true
+            )
+        }
+
         return migrator
     }
 
