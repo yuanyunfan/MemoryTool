@@ -9,6 +9,8 @@ import GRDB
 public final class MemoryService: Sendable {
     let db: AppDatabase
     private let embeddingService: EmbeddingService?
+    /// Serializes createMemory check-then-insert to prevent TOCTOU race on semantic dedup.
+    private let createMemoryQueue = DispatchQueue(label: "com.memorycore.createMemory")
 
     public init(database: AppDatabase, embeddingService: EmbeddingService? = nil) {
         self.db = database
@@ -82,6 +84,26 @@ public final class MemoryService: Sendable {
         tags: [String]? = nil,
         metadata: String? = nil
     ) throws -> Memory {
+        // Serialize check-then-insert to prevent TOCTOU race on semantic dedup.
+        try createMemoryQueue.sync {
+            return try self._createMemoryImpl(
+                content: content,
+                category: category,
+                source: source,
+                tags: tags,
+                metadata: metadata
+            )
+        }
+    }
+
+    /// Internal implementation of createMemory. Must be called under createMemoryQueue serialization.
+    private func _createMemoryImpl(
+        content: String,
+        category: String,
+        source: String?,
+        tags: [String]?,
+        metadata: String?
+    ) throws -> Memory {
         // Semantic deduplication: if a similar memory exists, update it instead
         let dupResult = try checkDuplicate(content: content)
         if case .similarExists(let existingId, _) = dupResult {
@@ -127,46 +149,24 @@ public final class MemoryService: Sendable {
         tags: [String]? = nil,
         metadata: String? = nil
     ) async throws -> Memory {
-        // Semantic deduplication: if a similar memory exists, update it instead
-        let dupResult = try await checkDuplicateAsync(content: content)
-        if case .similarExists(let existingId, _) = dupResult {
-            if let updated = try await updateMemoryAsync(id: existingId, content: content, category: category, source: source, metadata: metadata) {
-                return updated
+        // Serialize check-then-insert to prevent TOCTOU race on semantic dedup.
+        // We use withCheckedThrowingContinuation + DispatchQueue to bridge async to serial execution.
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Memory, Error>) in
+            self.createMemoryQueue.async {
+                do {
+                    let result = try self._createMemoryImpl(
+                        content: content,
+                        category: category,
+                        source: source,
+                        tags: tags,
+                        metadata: metadata
+                    )
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
         }
-
-        // Generate embedding using async API
-        let embeddingData: Data?
-        if let embeddingService {
-            if let vector = await embeddingService.embedAsync(content, isQuery: false) {
-                embeddingData = EmbeddingService.encodeEmbedding(vector)
-            } else {
-                embeddingData = nil
-            }
-        } else {
-            embeddingData = nil
-        }
-
-        let memory = Memory(
-            content: content,
-            category: category,
-            source: source,
-            metadata: metadata,
-            contentHash: Self.generateContentHash(content),
-            accessCount: 0,
-            lastAccessedAt: nil,
-            embedding: embeddingData
-        )
-
-        try await db.writer().write { dbConn in
-            try memory.insert(dbConn)
-
-            if let tags, !tags.isEmpty {
-                try self.insertTags(tags, for: memory.id, in: dbConn)
-            }
-        }
-
-        return memory
     }
 
     /// Fetches a single memory by ID.
