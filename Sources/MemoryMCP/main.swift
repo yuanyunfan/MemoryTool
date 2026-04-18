@@ -134,9 +134,8 @@ do {
                     // 3. Wait for in-flight proxy client requests to complete (with timeout)
                     await clientManager.gracefulShutdown(timeout: .seconds(5))
 
-                    // 4. Clean up daemon files and close the listen socket
+                    // 4. Clean up daemon files (listen socket is closed by acceptLoop)
                     DaemonManager.cleanupDaemon()
-                    close(listenFd)
 
                     logToStderr("Graceful shutdown complete, exiting.")
                     exit(0)
