@@ -157,8 +157,15 @@ do {
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler {
                 guard shutdownFlag.testAndSet() else {
-                    logToStderr("Received signal \(sig) again, shutdown already in progress. Ignoring.")
-                    return
+                    logToStderr("Received signal \(sig) again, forcing immediate exit.")
+                    // Second signal: force exit immediately since graceful shutdown is stuck
+                    do {
+                        try database.close()
+                    } catch {
+                        // Best effort
+                    }
+                    DaemonManager.cleanupDaemon()
+                    _exit(1)
                 }
                 logToStderr("Received signal \(sig), initiating graceful shutdown...")
 
@@ -190,7 +197,15 @@ do {
                 // Block the signal handler until cleanup completes (with timeout)
                 let result = semaphore.wait(timeout: .now() + 10)
                 if result == .timedOut {
-                    logToStderr("Shutdown timed out after 10 seconds, forcing exit.")
+                    logToStderr("Shutdown timed out after 10 seconds, performing synchronous cleanup before exit.")
+                    // Perform critical cleanup synchronously in case the Task never ran
+                    do {
+                        try database.close()
+                        logToStderr("Database closed successfully (fallback).")
+                    } catch {
+                        logToStderr("Warning: failed to close database in fallback: \(error)")
+                    }
+                    DaemonManager.cleanupDaemon()
                 }
                 exit(0)
             }
