@@ -503,6 +503,9 @@ public final class MemoryService: Sendable {
                         .replacingOccurrences(of: "^", with: "")
                         .replacingOccurrences(of: "+", with: "")
                         .replacingOccurrences(of: "-", with: "")
+                        .replacingOccurrences(of: "{", with: "")
+                        .replacingOccurrences(of: "}", with: "")
+                        .replacingOccurrences(of: "~", with: "")
                     guard !sanitized.isEmpty else { return nil }
                     return "\"\(sanitized)\""
                 }.joined(separator: " OR ")
