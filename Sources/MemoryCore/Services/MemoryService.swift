@@ -19,6 +19,9 @@ public final class MemoryService: Sendable {
     /// Static so that multiple MemoryService instances sharing the same database are also serialized.
     private static let createMemoryQueue = DispatchQueue(label: "com.memorycore.createMemory")
 
+    /// Actor-based serializer for async createMemory to avoid blocking GCD threads.
+    private static let createMemorySerializer = AsyncSerializer()
+
     public init(database: AppDatabase, embeddingService: EmbeddingService? = nil) {
         self.db = database
         self.embeddingService = embeddingService
@@ -157,6 +160,7 @@ public final class MemoryService: Sendable {
     /// Creates a new memory with semantic deduplication (async version).
     ///
     /// Prefer this over the sync version when calling from async contexts.
+    /// Uses an actor for async-native serialization to avoid blocking GCD threads.
     @discardableResult
     public func createMemoryAsync(
         content: String,
@@ -166,22 +170,104 @@ public final class MemoryService: Sendable {
         metadata: String? = nil
     ) async throws -> CreateMemoryResult {
         // Serialize check-then-insert to prevent TOCTOU race on semantic dedup.
-        // We use withCheckedThrowingContinuation + DispatchQueue to bridge async to serial execution.
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CreateMemoryResult, Error>) in
-            Self.createMemoryQueue.async {
-                do {
-                    let result = try self._createMemoryImpl(
-                        content: content,
-                        category: category,
-                        source: source,
-                        tags: tags,
-                        metadata: metadata
-                    )
-                    continuation.resume(returning: result)
-                } catch {
-                    continuation.resume(throwing: error)
+        try await Self.createMemorySerializer.serialize {
+            try await self._createMemoryImplAsync(
+                content: content,
+                category: category,
+                source: source,
+                tags: tags,
+                metadata: metadata
+            )
+        }
+    }
+
+    /// Async-native implementation of createMemory. Must be called under createMemorySerializer.
+    private func _createMemoryImplAsync(
+        content: String,
+        category: String,
+        source: String?,
+        tags: [String]?,
+        metadata: String?
+    ) async throws -> CreateMemoryResult {
+        // Generate embedding once and reuse for both dedup check and storage
+        let embeddingVec: [Float]?
+        if let embeddingService {
+            embeddingVec = await embeddingService.embedAsync(content, isQuery: false)
+        } else {
+            embeddingVec = nil
+        }
+
+        // Semantic deduplication: if a similar memory exists, update it instead
+        if let queryVec = embeddingVec {
+            let results = try batchedEmbeddingSearch(
+                query: queryVec,
+                topK: 1,
+                threshold: 0.85
+            )
+            if let top = results.first {
+                if let updated = try updateMemoryAsyncWithEmbedding(
+                    id: top.id, content: content, category: category,
+                    source: source, metadata: metadata, embeddingVec: embeddingVec
+                ) {
+                    return CreateMemoryResult(memory: updated, wasMerged: true)
                 }
             }
+        }
+
+        // Encode the pre-computed embedding for storage
+        let embeddingData = embeddingVec
+            .map { EmbeddingService.encodeEmbedding($0) }
+
+        let memory = Memory(
+            content: content,
+            category: category,
+            source: source,
+            metadata: metadata,
+            contentHash: Self.generateContentHash(content),
+            accessCount: 0,
+            lastAccessedAt: nil,
+            embedding: embeddingData
+        )
+
+        try await db.writer().write { dbConn in
+            try memory.insert(dbConn)
+
+            if let tags, !tags.isEmpty {
+                try self.insertTags(tags, for: memory.id, in: dbConn)
+            }
+        }
+
+        return CreateMemoryResult(memory: memory, wasMerged: false)
+    }
+
+    /// Update memory with a pre-computed embedding vector, avoiding redundant embed calls.
+    private func updateMemoryAsyncWithEmbedding(
+        id: String,
+        content: String?,
+        category: String?,
+        source: String?,
+        metadata: String?,
+        embeddingVec: [Float]?
+    ) throws -> Memory? {
+        let newEmbeddingData = embeddingVec.map { EmbeddingService.encodeEmbedding($0) }
+
+        return try db.writer().write { dbConn -> Memory? in
+            guard var memory = try Memory.fetchOne(dbConn, key: id) else {
+                return nil
+            }
+
+            if let content {
+                memory.content = content
+                memory.contentHash = Self.generateContentHash(content)
+                memory.embedding = newEmbeddingData
+            }
+            if let category { memory.category = category }
+            if let source { memory.source = source }
+            if let metadata { memory.metadata = metadata }
+            memory.updatedAt = Date()
+
+            try memory.update(dbConn)
+            return memory
         }
     }
 
@@ -1055,6 +1141,15 @@ public final class MemoryService: Sendable {
                 let join = MemoryTag(memoryId: memoryId, tagId: tagId)
                 try join.insert(dbConn)
             }
+        }
+    }
+
+    // MARK: - Async Serializer
+
+    /// Actor that serializes async operations to prevent TOCTOU races without blocking GCD threads.
+    private actor AsyncSerializer {
+        func serialize<T: Sendable>(_ operation: @Sendable () async throws -> T) async throws -> T {
+            try await operation()
         }
     }
 
