@@ -12,6 +12,24 @@ func logToStderr(_ message: String) {
     FileHandle.standardError.write(Data("[MemoryMCP] \(message)\n".utf8))
 }
 
+// MARK: - Thread-safe shutdown flag
+
+/// An atomic flag that ensures only one shutdown sequence runs.
+final class AtomicFlag: @unchecked Sendable {
+    private var _value = false
+    private let lock = NSLock()
+
+    /// Atomically sets the flag. Returns `true` on the first call (caller wins),
+    /// `false` on subsequent calls (flag was already set).
+    func testAndSet() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if _value { return false }
+        _value = true
+        return true
+    }
+}
+
 // MARK: - Database Setup
 
 /// Resolve the database path and initialise AppDatabase.
@@ -119,17 +137,17 @@ do {
         let clientManager = ClientManager(handler: handler)
 
         // Register cleanup handler with graceful shutdown
-        var shutdownInProgress = false
+        let shutdownFlag = AtomicFlag()
         let signalSources = [SIGTERM, SIGINT].map { sig -> DispatchSourceSignal in
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler {
-                guard !shutdownInProgress else {
+                guard shutdownFlag.testAndSet() else {
                     logToStderr("Received signal \(sig) again, shutdown already in progress. Ignoring.")
                     return
                 }
-                shutdownInProgress = true
                 logToStderr("Received signal \(sig), initiating graceful shutdown...")
 
+                let semaphore = DispatchSemaphore(value: 0)
                 Task {
                     // 1. Stop accepting new connections
                     // (gracefulShutdown cancels the accept loop internally)
@@ -152,8 +170,14 @@ do {
                     DaemonManager.cleanupDaemon()
 
                     logToStderr("Graceful shutdown complete, exiting.")
-                    exit(0)
+                    semaphore.signal()
                 }
+                // Block the signal handler until cleanup completes (with timeout)
+                let result = semaphore.wait(timeout: .now() + 10)
+                if result == .timedOut {
+                    logToStderr("Shutdown timed out after 10 seconds, forcing exit.")
+                }
+                exit(0)
             }
             signal(sig, SIG_IGN) // Ignore default handler
             source.resume()
