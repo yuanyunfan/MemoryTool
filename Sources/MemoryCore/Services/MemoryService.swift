@@ -2,6 +2,12 @@ import CryptoKit
 import Foundation
 import GRDB
 
+/// Result of a createMemory operation, indicating whether the memory was newly created or merged with an existing one.
+public struct CreateMemoryResult: Sendable {
+    public let memory: Memory
+    public let wasMerged: Bool
+}
+
 /// Service layer providing all memory data operations.
 ///
 /// Thread-safe: backed by GRDB's serialized database access.
@@ -93,7 +99,7 @@ public final class MemoryService: Sendable {
                 source: source,
                 tags: tags,
                 metadata: metadata
-            )
+            ).memory
         }
     }
 
@@ -104,7 +110,7 @@ public final class MemoryService: Sendable {
         source: String?,
         tags: [String]?,
         metadata: String?
-    ) throws -> Memory {
+    ) throws -> CreateMemoryResult {
         // Generate embedding once and reuse for both dedup check and storage
         let embeddingVec = embeddingService?.embed(content, isQuery: false)
 
@@ -117,7 +123,7 @@ public final class MemoryService: Sendable {
             )
             if let top = results.first {
                 if let updated = try updateMemory(id: top.id, content: content, category: category, source: source, metadata: metadata) {
-                    return updated
+                    return CreateMemoryResult(memory: updated, wasMerged: true)
                 }
             }
         }
@@ -145,7 +151,7 @@ public final class MemoryService: Sendable {
             }
         }
 
-        return memory
+        return CreateMemoryResult(memory: memory, wasMerged: false)
     }
 
     /// Creates a new memory with semantic deduplication (async version).
@@ -158,10 +164,10 @@ public final class MemoryService: Sendable {
         source: String? = nil,
         tags: [String]? = nil,
         metadata: String? = nil
-    ) async throws -> Memory {
+    ) async throws -> CreateMemoryResult {
         // Serialize check-then-insert to prevent TOCTOU race on semantic dedup.
         // We use withCheckedThrowingContinuation + DispatchQueue to bridge async to serial execution.
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Memory, Error>) in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CreateMemoryResult, Error>) in
             Self.createMemoryQueue.async {
                 do {
                     let result = try self._createMemoryImpl(
