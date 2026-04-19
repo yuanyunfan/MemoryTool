@@ -585,20 +585,11 @@ public final class MemoryService: Sendable {
 
             if !ftsTerms.isEmpty {
                 let ftsQuery = ftsTerms.compactMap { term -> String? in
-                    // Strip all FTS5 special characters before double-quoting to prevent injection
-                    let sanitized = term
-                        .replacingOccurrences(of: "\\", with: "")
-                        .replacingOccurrences(of: "\"", with: "")
-                        .replacingOccurrences(of: "(", with: "")
-                        .replacingOccurrences(of: ")", with: "")
-                        .replacingOccurrences(of: ":", with: "")
-                        .replacingOccurrences(of: "*", with: "")
-                        .replacingOccurrences(of: "^", with: "")
-                        .replacingOccurrences(of: "+", with: "")
-                        .replacingOccurrences(of: "-", with: "")
-                        .replacingOccurrences(of: "{", with: "")
-                        .replacingOccurrences(of: "}", with: "")
-                        .replacingOccurrences(of: "~", with: "")
+                    // Whitelist approach: only keep alphanumeric, CJK, and common Unicode letters/numbers.
+                    // This prevents FTS5 injection by stripping ALL special/operator characters.
+                    let sanitized = String(term.filter { ch in
+                        ch.isLetter || ch.isNumber || ch.isWhitespace
+                    }).trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !sanitized.isEmpty else { return nil }
                     return "\"\(sanitized)\""
                 }.joined(separator: " OR ")
