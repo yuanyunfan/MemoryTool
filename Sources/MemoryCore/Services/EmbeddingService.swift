@@ -237,7 +237,8 @@ public final class EmbeddingService: @unchecked Sendable {
 
         let floatCount = data.count / floatSize
         if floatCount != dimension {
-            logToStderr("EmbeddingService: decodeEmbedding warning — decoded \(floatCount) floats, expected \(dimension)")
+            logToStderr("EmbeddingService: decodeEmbedding failed — decoded \(floatCount) floats, expected \(dimension)")
+            return []
         }
 
         return data.withUnsafeBytes { raw in
