@@ -10,7 +10,8 @@ public final class MemoryService: Sendable {
     let db: AppDatabase
     private let embeddingService: EmbeddingService?
     /// Serializes createMemory check-then-insert to prevent TOCTOU race on semantic dedup.
-    private let createMemoryQueue = DispatchQueue(label: "com.memorycore.createMemory")
+    /// Static so that multiple MemoryService instances sharing the same database are also serialized.
+    private static let createMemoryQueue = DispatchQueue(label: "com.memorycore.createMemory")
 
     public init(database: AppDatabase, embeddingService: EmbeddingService? = nil) {
         self.db = database
@@ -85,7 +86,7 @@ public final class MemoryService: Sendable {
         metadata: String? = nil
     ) throws -> Memory {
         // Serialize check-then-insert to prevent TOCTOU race on semantic dedup.
-        try createMemoryQueue.sync {
+        try Self.createMemoryQueue.sync {
             return try self._createMemoryImpl(
                 content: content,
                 category: category,
@@ -161,7 +162,7 @@ public final class MemoryService: Sendable {
         // Serialize check-then-insert to prevent TOCTOU race on semantic dedup.
         // We use withCheckedThrowingContinuation + DispatchQueue to bridge async to serial execution.
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Memory, Error>) in
-            self.createMemoryQueue.async {
+            Self.createMemoryQueue.async {
                 do {
                     let result = try self._createMemoryImpl(
                         content: content,
