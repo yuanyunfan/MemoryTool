@@ -56,7 +56,7 @@ struct ToolHandler: Sendable {
         do {
             // Rely on createMemoryAsync's built-in deduplication to avoid
             // redundant embedding computation and double DB writes.
-            let memory = try await service.createMemoryAsync(
+            let result = try await service.createMemoryAsync(
                 content: content,
                 category: category,
                 source: source,
@@ -64,25 +64,21 @@ struct ToolHandler: Sendable {
                 metadata: userMetadata
             )
 
-            // Detect whether createMemoryAsync merged with an existing memory
-            // by checking if the memory existed before this call (createdAt < updatedAt).
-            let wasMerged = memory.createdAt < memory.updatedAt
-
-            if wasMerged {
+            if result.wasMerged {
                 // Ensure tags are also merged for deduplicated memories
                 if let tags, !tags.isEmpty {
-                    try service.addTags(to: memory.id, tags: tags)
+                    try service.addTags(to: result.memory.id, tags: tags)
                 }
 
                 let response: [String: Any] = [
-                    "id": memory.id,
+                    "id": result.memory.id,
                     "message": "Merged with existing similar memory.",
                     "deduplicated": true,
                 ]
                 return textResult(toJSON(response))
             } else {
                 let response: [String: Any] = [
-                    "id": memory.id,
+                    "id": result.memory.id,
                     "message": "Memory stored successfully.",
                 ]
                 return textResult(toJSON(response))
