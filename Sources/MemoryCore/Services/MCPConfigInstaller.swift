@@ -53,25 +53,27 @@ public struct MCPConfigInstaller: Sendable {
             throw ConfigInstallerError.binaryNotFound
         }
 
-        var root = try readSettingsFile(at: path)
+        return try withFileLock(for: path) {
+            var root = try readSettingsFile(at: path)
 
-        // Ensure mcpServers dictionary exists
-        var mcpServers = root["mcpServers"] as? [String: Any] ?? [:]
+            // Ensure mcpServers dictionary exists
+            var mcpServers = root["mcpServers"] as? [String: Any] ?? [:]
 
-        // Build the entry
-        let entry: [String: Any] = [
-            "command": binary,
-            "args": [String](),
-            "env": [String: String](),
-        ]
+            // Build the entry
+            let entry: [String: Any] = [
+                "command": binary,
+                "args": [String](),
+                "env": [String: String](),
+            ]
 
-        mcpServers[serverKey] = entry
-        root["mcpServers"] = mcpServers
+            mcpServers[serverKey] = entry
+            root["mcpServers"] = mcpServers
 
-        try writeSettingsFile(root, to: path)
+            try writeSettingsFile(root, to: path)
 
-        let action = "Installed"
-        return "\(action) \(serverKey) → \(binary) in \(path)"
+            let action = "Installed"
+            return "\(action) \(serverKey) → \(binary) in \(path)"
+        }
     }
 
     // MARK: - Uninstall
@@ -81,16 +83,19 @@ public struct MCPConfigInstaller: Sendable {
     /// - Parameter settingsPath: Path to settings.json (override for testing).
     public static func uninstall(settingsPath: String? = nil) throws {
         let path = settingsPath ?? claudeSettingsPath
-        var root = try readSettingsFile(at: path)
 
-        guard var mcpServers = root["mcpServers"] as? [String: Any] else {
-            return // nothing to remove
+        try withFileLock(for: path) {
+            var root = try readSettingsFile(at: path)
+
+            guard var mcpServers = root["mcpServers"] as? [String: Any] else {
+                return // nothing to remove
+            }
+
+            mcpServers.removeValue(forKey: serverKey)
+            root["mcpServers"] = mcpServers
+
+            try writeSettingsFile(root, to: path)
         }
-
-        mcpServers.removeValue(forKey: serverKey)
-        root["mcpServers"] = mcpServers
-
-        try writeSettingsFile(root, to: path)
     }
 
     // MARK: - Query
@@ -165,6 +170,34 @@ public struct MCPConfigInstaller: Sendable {
         return result
     }
 
+    // MARK: - File Locking
+
+    /// Executes a closure while holding an exclusive file lock (flock) on a
+    /// lock file adjacent to the settings file. This prevents TOCTOU races
+    /// when multiple processes perform read-modify-write on the same file.
+    private static func withFileLock<T>(for path: String, body: () throws -> T) throws -> T {
+        let lockPath = path + ".lock"
+        let dir = (lockPath as NSString).deletingLastPathComponent
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: dir) {
+            try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        }
+        // Create lock file if needed
+        if !fm.fileExists(atPath: lockPath) {
+            fm.createFile(atPath: lockPath, contents: nil)
+        }
+        let fd = open(lockPath, O_RDWR)
+        guard fd >= 0 else {
+            throw ConfigInstallerError.lockFailed
+        }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else {
+            throw ConfigInstallerError.lockFailed
+        }
+        defer { flock(fd, LOCK_UN) }
+        return try body()
+    }
+
     // MARK: - Private Helpers
 
     /// Reads an existing settings file or returns an empty dictionary if not found.
@@ -214,6 +247,7 @@ public struct MCPConfigInstaller: Sendable {
 public enum ConfigInstallerError: Error, LocalizedError {
     case binaryNotFound
     case invalidSettingsFormat
+    case lockFailed
 
     public var errorDescription: String? {
         switch self {
@@ -221,6 +255,8 @@ public enum ConfigInstallerError: Error, LocalizedError {
             "MemoryMCP binary not found. Build the project first or supply an explicit path."
         case .invalidSettingsFormat:
             "settings.json exists but is not a valid JSON object."
+        case .lockFailed:
+            "Failed to acquire file lock on settings.json."
         }
     }
 }
