@@ -34,23 +34,38 @@ final class AtomicFlag: @unchecked Sendable {
 
 /// Resolve the database path and initialise AppDatabase.
 func createDatabase() throws -> AppDatabase {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let defaultDir = "\(home)/.memorytool"
+
     if let envPath = ProcessInfo.processInfo.environment["MEMORY_TOOL_DB_PATH"], !envPath.isEmpty {
-        let dir = (envPath as NSString).deletingLastPathComponent
+        // Resolve the path to eliminate symlinks and relative components
+        let resolvedPath = (envPath as NSString).standardizingPath
+        let resolvedURL = URL(fileURLWithPath: resolvedPath).standardized.resolvingSymlinksInPath()
+        let resolvedString = resolvedURL.path
+
+        // Validate that the resolved path is under the user's home directory
+        let homeResolved = URL(fileURLWithPath: home).standardized.resolvingSymlinksInPath().path
+        guard resolvedString.hasPrefix(homeResolved + "/") else {
+            logToStderr("Error: MEMORY_TOOL_DB_PATH must resolve to a path under the user's home directory (\(homeResolved)). Got: \(resolvedString)")
+            throw NSError(domain: "MemoryMCP", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "MEMORY_TOOL_DB_PATH resolves to a path outside the home directory, which is not allowed for security reasons."
+            ])
+        }
+
+        let dir = (resolvedString as NSString).deletingLastPathComponent
         try FileManager.default.createDirectory(
             atPath: dir,
             withIntermediateDirectories: true
         )
-        logToStderr("Using database at \(envPath)")
-        return try AppDatabase.create(path: envPath)
+        logToStderr("Using database at \(resolvedString)")
+        return try AppDatabase.create(path: resolvedString)
     }
 
-    let home = FileManager.default.homeDirectoryForCurrentUser.path
-    let dir = "\(home)/.memorytool"
     try FileManager.default.createDirectory(
-        atPath: dir,
+        atPath: defaultDir,
         withIntermediateDirectories: true
     )
-    let dbPath = "\(dir)/memory.db"
+    let dbPath = "\(defaultDir)/memory.db"
     logToStderr("Using database at \(dbPath)")
     return try AppDatabase.create(path: dbPath)
 }
